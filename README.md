@@ -61,7 +61,7 @@ chmod +x gradlew
 gradlew.bat testDebugUnitTest
 gradlew.bat assembleDebug
 ```
-> **참고**: 클론 직후 `debug.keystore`가 없더라도 Gradle이 자동으로 `debug.keystore.base64`를 복원하여 서명 빌드를 수행합니다.
+> **참고**: 클론 직후 `debug.keystore`가 없더라도 Gradle이 자동으로 `debug.keystore`를 복원하거나 `keytool`로 생성하여 서명 빌드를 수행합니다.
 
 생성된 APK 경로:
 - `app/build/outputs/apk/debug/app-debug.apk`
