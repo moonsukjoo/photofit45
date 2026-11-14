@@ -40,23 +40,27 @@ jobs:
           if [ -n "$SDKMANAGER" ] && [ -x "$SDKMANAGER" ]; then
             (yes || true) | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses | tail -n 15 || true
           fi
-          ls -la "$SDK_DIR/licenses"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Restore debug.keystore from debug.keystore.base64
+      - name: Restore & Verify debug.keystore
         run: |
           if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
             tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
-            echo "debug.keystore restored successfully."
           fi
+          keytool -list -keystore debug.keystore -storepass android
 
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Run Unit Tests
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+      - name: Run Unit Tests & Build Debug APK
+        run: |
+          ./gradlew testDebugUnitTest assembleDebug \
+            --no-daemon \
+            --console=plain \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx2560m -Dfile.encoding=UTF-8"
 
       - name: Upload Unit Test Report
         if: always()
@@ -65,9 +69,6 @@ jobs:
           name: unit-test-report
           path: app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
-
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -125,7 +126,11 @@ jobs:
 
           printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "$RUNNER_TEMP/release-keystore.jks"
           export KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
-          ./gradlew assembleRelease bundleRelease --no-daemon --stacktrace
+          ./gradlew assembleRelease bundleRelease \
+            --no-daemon \
+            --console=plain \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx2560m -Dfile.encoding=UTF-8"
 
       - name: Upload Release APK & AAB
         if: hashFiles('app/build/outputs/apk/release/*.apk') != ''
