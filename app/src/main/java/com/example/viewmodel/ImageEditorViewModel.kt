@@ -527,13 +527,36 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
     fun loadDevicePhotos(context: Context) {
         viewModelScope.launch {
             _batchState.update { it.copy(statusMessage = "기기 갤러리 사진을 불러오는 중...") }
-            val uris = withContext(Dispatchers.IO) {
-                ImageUtils.queryDevicePhotos(context, limit = 500)
+            val entries = withContext(Dispatchers.IO) {
+                ImageUtils.queryDevicePhotosWithMetadata(context, limit = 500)
             }
-            if (uris.isNotEmpty()) {
-                addBatchImages(context, uris)
+            if (entries.isNotEmpty()) {
+                val newItems = entries.map { entry ->
+                    BatchProcessItem(
+                        id = UUID.randomUUID().toString(),
+                        uri = entry.uri,
+                        fileName = entry.name,
+                        originalSizeBytes = entry.sizeBytes,
+                        originalWidth = entry.width,
+                        originalHeight = entry.height,
+                        mimeType = entry.mimeType,
+                        status = BatchItemStatus.PENDING
+                    )
+                }
+                _batchState.update { state ->
+                    val existingUris = state.items.map { it.uri }.toSet()
+                    val filteredNew = newItems.filterNot { it.uri in existingUris }
+                    val combined = state.items + filteredNew
+                    val totalOriginal = combined.sumOf { it.originalSizeBytes }
+                    state.copy(
+                        items = combined,
+                        totalOriginalBytes = totalOriginal,
+                        isCompleted = false,
+                        statusMessage = "${filteredNew.size}개 기기 사진을 불러왔습니다."
+                    )
+                }
             } else {
-                _batchState.update { it.copy(statusMessage = "불러올 수 있는 기기 사진이 없습니다.") }
+                _batchState.update { it.copy(statusMessage = "불러올 수 있는 기기 사진이 없습니다. (권한 또는 갤러리를 확인해 주세요)") }
             }
         }
     }

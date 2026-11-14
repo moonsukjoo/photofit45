@@ -1,10 +1,16 @@
 package com.example.ui.batch
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -65,9 +71,15 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -102,12 +114,56 @@ fun BatchCompressScreen(
     onBatchShare: (List<Uri>) -> Unit
 ) {
     val context = LocalContext.current
+    var showPermissionDeniedDialog by remember { mutableStateOf(false) }
+
     val batchPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
             viewModel.addBatchImages(context, uris)
         }
+    }
+
+    val galleryPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        if (hasGalleryReadPermission(context)) {
+            viewModel.loadDevicePhotos(context)
+        } else {
+            showPermissionDeniedDialog = true
+        }
+    }
+
+    if (showPermissionDeniedDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionDeniedDialog = false },
+            title = { Text("갤러리 접근 권한 필요", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "기기 갤러리의 모든 사진을 불러오려면 사진 및 이미지 접근 권한이 필요합니다.\n\n" +
+                        "앱 설정에서 '사진 및 동영상' 권한을 허용하시거나, '갤러리에서 사진 다중 선택' 버튼을 이용해 주세요."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPermissionDeniedDialog = false
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        )
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Text("설정으로 이동")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionDeniedDialog = false }) {
+                    Text("닫기")
+                }
+            }
+        )
     }
 
     if (batchState.items.isEmpty()) {
@@ -118,7 +174,11 @@ fun BatchCompressScreen(
                 )
             },
             onLoadDevicePhotos = {
-                viewModel.loadDevicePhotos(context)
+                if (hasFullGalleryReadPermission(context)) {
+                    viewModel.loadDevicePhotos(context)
+                } else {
+                    galleryPermissionLauncher.launch(requiredGalleryPermissions())
+                }
             },
             modifier = modifier
         )
@@ -1018,5 +1078,45 @@ private fun BatchItemCard(
                 }
             }
         }
+    }
+}
+
+private fun hasFullGalleryReadPermission(context: Context): Boolean {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_MEDIA_IMAGES
+        ) == PackageManager.PERMISSION_GRANTED
+    } else {
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+}
+
+private fun hasGalleryReadPermission(context: Context): Boolean {
+    if (hasFullGalleryReadPermission(context)) return true
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+    return false
+}
+
+private fun requiredGalleryPermissions(): Array<String> {
+    return when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+        )
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES
+        )
+        else -> arrayOf(
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        )
     }
 }

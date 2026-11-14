@@ -624,31 +624,108 @@ object ImageUtils {
         return count
     }
 
+    data class DevicePhotoEntry(
+        val uri: Uri,
+        val name: String,
+        val sizeBytes: Long,
+        val width: Int,
+        val height: Int,
+        val mimeType: String
+    )
+
     fun queryDevicePhotos(context: Context, limit: Int = 500): List<Uri> {
-        val uris = mutableListOf<Uri>()
-        val projection = arrayOf(MediaStore.Images.Media._ID)
+        return queryDevicePhotosWithMetadata(context, limit).map { it.uri }
+    }
+
+    fun queryDevicePhotosWithMetadata(context: Context, limit: Int = 500): List<DevicePhotoEntry> {
+        val items = mutableListOf<DevicePhotoEntry>()
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.SIZE,
+            MediaStore.Images.Media.WIDTH,
+            MediaStore.Images.Media.HEIGHT,
+            MediaStore.Images.Media.MIME_TYPE,
+            MediaStore.Images.Media.ORIENTATION
+        )
         val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
         try {
+            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
             context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                collection,
                 projection,
                 null,
                 null,
                 sortOrder
             )?.use { cursor ->
-                val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                while (cursor.moveToNext() && uris.size < limit) {
-                    val id = cursor.getLong(idColumn)
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                val sizeCol = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
+                val widthCol = cursor.getColumnIndex(MediaStore.Images.Media.WIDTH)
+                val heightCol = cursor.getColumnIndex(MediaStore.Images.Media.HEIGHT)
+                val mimeCol = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+                val orientCol = cursor.getColumnIndex(MediaStore.Images.Media.ORIENTATION)
+
+                while (cursor.moveToNext() && items.size < limit) {
+                    val id = cursor.getLong(idCol)
                     val contentUri = android.content.ContentUris.withAppendedId(
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
                     )
-                    uris.add(contentUri)
+                    val name = if (nameCol != -1 && !cursor.isNull(nameCol)) {
+                        cursor.getString(nameCol)
+                    } else {
+                        "image_$id.jpg"
+                    }
+                    val size = if (sizeCol != -1 && !cursor.isNull(sizeCol)) cursor.getLong(sizeCol) else 0L
+                    var width = if (widthCol != -1 && !cursor.isNull(widthCol)) cursor.getInt(widthCol) else 0
+                    var height = if (heightCol != -1 && !cursor.isNull(heightCol)) cursor.getInt(heightCol) else 0
+                    val orientation = if (orientCol != -1 && !cursor.isNull(orientCol)) cursor.getInt(orientCol) else 0
+                    val mime = if (mimeCol != -1 && !cursor.isNull(mimeCol)) {
+                        cursor.getString(mimeCol)
+                    } else {
+                        "image/jpeg"
+                    }
+
+                    if (orientation == 90 || orientation == 270) {
+                        val tmp = width
+                        width = height
+                        height = tmp
+                    }
+
+                    if (width <= 0 || height <= 0 || size <= 0L) {
+                        val fallback = getImageMetadata(context, contentUri)
+                        items.add(
+                            DevicePhotoEntry(
+                                uri = contentUri,
+                                name = fallback.name,
+                                sizeBytes = fallback.sizeBytes,
+                                width = fallback.width,
+                                height = fallback.height,
+                                mimeType = fallback.mimeType
+                            )
+                        )
+                    } else {
+                        items.add(
+                            DevicePhotoEntry(
+                                uri = contentUri,
+                                name = name,
+                                sizeBytes = size,
+                                width = width,
+                                height = height,
+                                mimeType = mime
+                            )
+                        )
+                    }
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return uris
+        return items
     }
 
     fun getExifDateFormatted(context: Context, uri: Uri): String {
