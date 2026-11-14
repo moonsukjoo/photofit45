@@ -105,7 +105,7 @@ data class ImageAdjustment(
 }
 
 data class SingleEditConfig(
-    val quality: Int = 80,
+    val quality: Int = 75,
     val format: ImageFormat = ImageFormat.JPEG,
     val resizeMode: ResizeMode = ResizeMode.ORIGINAL,
     val customWidth: Int = 0,
@@ -116,7 +116,8 @@ data class SingleEditConfig(
     val adjustments: ImageAdjustment = ImageAdjustment(),
     val watermarkText: String = "",
     val watermarkPosition: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT,
-    val removeExifMetadata: Boolean = true
+    val removeExifMetadata: Boolean = true,
+    val preserveOriginalDate: Boolean = true
 )
 
 enum class BatchItemStatus {
@@ -134,6 +135,7 @@ data class BatchProcessItem(
     val originalWidth: Int,
     val originalHeight: Int,
     val mimeType: String,
+    val originalDateTakenMs: Long = 0L,
     val processedSizeBytes: Long? = null,
     val resultUri: Uri? = null,
     val status: BatchItemStatus = BatchItemStatus.PENDING,
@@ -153,7 +155,7 @@ data class BatchProcessItem(
 }
 
 enum class RenamePattern(val displayName: String, val example: String) {
-    KEEP_ORIGINAL("원본 파일명 유지", "기존 긴 파일명 그대로"),
+    KEEP_ORIGINAL("원본 파일명 유지", "기존 파일명 그대로"),
     DATE_TIME("촬영 날짜_시간_순번", "20261112_143025_001.jpg"),
     CUSTOM_PREFIX("사용자 지정 접두사_순번", "제주여행_001.jpg"),
     CLEAN_SIMPLE("포토핏_순번", "PhotoFit_001.jpg")
@@ -175,6 +177,7 @@ data class BatchConfig(
     val renamePattern: RenamePattern = RenamePattern.KEEP_ORIGINAL,
     val customPrefix: String = "",
     val removeExifMetadata: Boolean = true,
+    val preserveOriginalDate: Boolean = true,
     val watermarkText: String = "",
     val watermarkPosition: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT
 )

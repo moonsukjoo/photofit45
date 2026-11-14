@@ -473,3 +473,168 @@ private fun ExifInfoRow(label: String, value: String) {
         )
     }
 }
+
+private data class CompressionTier(
+    val quality: Int,
+    val title: String,
+    val exampleText: String,
+    val description: String,
+    val isRecommended: Boolean = false
+)
+
+@Composable
+fun CompressionQualitySelector(
+    selectedQuality: Int,
+    onQualitySelected: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tiers = listOf(
+        CompressionTier(
+            quality = 92,
+            title = "최하 압축",
+            exampleText = "9MB → 약 7MB",
+            description = "화질 최우선 (92%)"
+        ),
+        CompressionTier(
+            quality = 75,
+            title = "중간 압축",
+            exampleText = "9MB → 약 5MB",
+            description = "추천 균형 (75%)",
+            isRecommended = true
+        ),
+        CompressionTier(
+            quality = 45,
+            title = "최대 압축",
+            exampleText = "9MB → 약 2MB",
+            description = "대폭 절약 (45%)"
+        )
+    )
+
+    val activeTierQuality = when {
+        selectedQuality >= 85 -> 92
+        selectedQuality >= 60 -> 75
+        else -> 45
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            tiers.forEach { tier ->
+                val isSelected = activeTierQuality == tier.quality
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onQualitySelected(tier.quality) }
+                        .testTag("compression_tier_${tier.quality}"),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isSelected) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surface
+                        }
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(
+                        width = if (isSelected) 1.8.dp else 1.dp,
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant
+                        }
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = tier.title,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 1
+                            )
+                            if (tier.isRecommended) {
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primary
+                                ) {
+                                    Text(
+                                        text = "추천",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                            }
+                        ) {
+                            Text(
+                                text = tier.exampleText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (isSelected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(5.dp))
+
+                        Text(
+                            text = tier.description,
+                            fontSize = 10.sp,
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            textAlign = TextAlign.Center,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "💡 예시 기준(9MB 사진): 최대압축 약 2MB · 중간압축 약 5MB · 최하압축 약 7MB (실제 용량은 해상도·포맷에 따라 달라집니다)",
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+

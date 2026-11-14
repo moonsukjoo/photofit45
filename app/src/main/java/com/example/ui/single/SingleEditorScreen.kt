@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.PhotoSizeSelectActual
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Transform
 import androidx.compose.material.icons.filled.Tune
@@ -99,6 +100,7 @@ import com.example.model.FilterPreset
 import com.example.model.ImageAdjustment
 import com.example.model.ImageFormat
 import com.example.model.ResizeMode
+import com.example.ui.components.CompressionQualitySelector
 import com.example.ui.components.LabeledSlider
 import com.example.ui.components.OptionSwitchCard
 import com.example.ui.components.SavingsBadge
@@ -642,50 +644,31 @@ private fun CompressToolPanel(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = "압축 품질 설정",
+            text = "압축 강도 선택 (예상 용량 감소)",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface
         )
 
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Preset quality tier cards (최하 / 중간 / 최대 압축 + 9MB examples)
+        CompressionQualitySelector(
+            selectedQuality = uiState.config.quality,
+            onQualitySelected = { q -> viewModel.updateSingleQuality(q) }
+        )
+
         Spacer(modifier = Modifier.height(12.dp))
-
-        // Preset quality chips
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val presets = listOf(
-                Pair(90, "고화질 (90%)"),
-                Pair(75, "추천 (75%)"),
-                Pair(50, "알뜰 (50%)"),
-                Pair(30, "초소형 (30%)")
-            )
-            presets.forEach { (q, label) ->
-                FilterChip(
-                    selected = uiState.config.quality == q,
-                    onClick = { viewModel.updateSingleQuality(q) },
-                    label = { Text(label, fontSize = 12.sp) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                        selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                    ),
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
 
         // Quality slider
         LabeledSlider(
-            label = "세부 품질 슬라이더",
+            label = "세부 화질 직접 조절 (높을수록 고화질·큰 용량)",
             value = uiState.config.quality.toFloat(),
             onValueChange = { viewModel.updateSingleQuality(it.roundToInt()) },
             valueRange = 1f..100f,
             unit = "%",
-            defaultValue = 80f,
-            onReset = { viewModel.updateSingleQuality(80) }
+            defaultValue = 75f,
+            onReset = { viewModel.updateSingleQuality(75) }
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -726,7 +709,19 @@ private fun CompressToolPanel(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Preserve Original Date toggle
+        OptionSwitchCard(
+            title = "원본 촬영·생성 날짜 유지 (갤러리 정렬 유지)",
+            subtitle = "저장 시 원본 사진의 촬영 날짜를 유지해 갤러리에서 최신 날짜로 올라오는 현상을 막습니다.",
+            checked = uiState.config.preserveOriginalDate,
+            onCheckedChange = { viewModel.updateSinglePreserveDate(it) },
+            icon = Icons.Default.Schedule,
+            testTag = "single_preserve_date_toggle"
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
 
         // Delete Original Toggle Option (Requested by user!)
         OptionSwitchCard(

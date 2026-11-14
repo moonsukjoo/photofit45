@@ -18,6 +18,7 @@ import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.Shader
 import android.media.ExifInterface
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -43,7 +44,8 @@ data class ImageMetadata(
     val sizeBytes: Long,
     val width: Int,
     val height: Int,
-    val mimeType: String
+    val mimeType: String,
+    val dateTakenMs: Long = 0L
 )
 
 object ImageUtils {
@@ -67,18 +69,33 @@ object ImageUtils {
         var name = "image_${System.currentTimeMillis()}"
         var size: Long = 0
         var mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+        var dateTakenMs = 0L
+        var dateModifiedSec = 0L
+        var dateAddedSec = 0L
 
-        // Query file name and size from content resolver
+        // Query file name, size, and timestamps from content resolver
         try {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                val takenIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val modIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+                val addedIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
                 if (cursor.moveToFirst()) {
                     if (nameIndex != -1 && !cursor.isNull(nameIndex)) {
                         name = cursor.getString(nameIndex)
                     }
                     if (sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
                         size = cursor.getLong(sizeIndex)
+                    }
+                    if (takenIndex != -1 && !cursor.isNull(takenIndex)) {
+                        dateTakenMs = cursor.getLong(takenIndex)
+                    }
+                    if (modIndex != -1 && !cursor.isNull(modIndex)) {
+                        dateModifiedSec = cursor.getLong(modIndex)
+                    }
+                    if (addedIndex != -1 && !cursor.isNull(addedIndex)) {
+                        dateAddedSec = cursor.getLong(addedIndex)
                     }
                 }
             }
@@ -110,7 +127,7 @@ object ImageUtils {
             }
         } catch (_: Exception) {}
 
-        // Check EXIF orientation
+        // Check EXIF orientation & EXIF date fallback
         val orientation = getExifOrientation(context, uri)
         if (orientation == 90 || orientation == 270) {
             val temp = width
@@ -118,13 +135,60 @@ object ImageUtils {
             height = temp
         }
 
+        if (dateTakenMs <= 0L) {
+            dateTakenMs = getExifDateMillis(context, uri)
+        }
+        val effectiveDateMs = resolveEffectiveDateMs(dateTakenMs, dateModifiedSec, dateAddedSec)
+
         return ImageMetadata(
             name = name,
             sizeBytes = size,
             width = max(1, width),
             height = max(1, height),
-            mimeType = mimeType
+            mimeType = mimeType,
+            dateTakenMs = effectiveDateMs
         )
+    }
+
+    fun resolveEffectiveDateMs(
+        dateTakenMs: Long,
+        dateModifiedSec: Long,
+        dateAddedSec: Long
+    ): Long {
+        return when {
+            dateTakenMs > 0L -> dateTakenMs
+            dateModifiedSec > 0L -> dateModifiedSec * 1000L
+            dateAddedSec > 0L -> dateAddedSec * 1000L
+            else -> 0L
+        }
+    }
+
+    fun parseExifDateTimeToMillis(exifDate: String?): Long {
+        if (exifDate.isNullOrBlank()) return 0L
+        return try {
+            val sdf = java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US)
+            sdf.parse(exifDate.trim())?.time ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    fun formatExifDateTime(epochMs: Long): String {
+        val sdf = java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US)
+        return sdf.format(java.util.Date(epochMs))
+    }
+
+    private fun getExifDateMillis(context: Context, uri: Uri): Long {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val exif = ExifInterface(input)
+                val dateStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED)
+                    ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+                return parseExifDateTimeToMillis(dateStr)
+            }
+        } catch (_: Exception) {}
+        return 0L
     }
 
     private fun getExifOrientation(context: Context, uri: Uri): Int {
@@ -530,15 +594,31 @@ object ImageUtils {
         bytes: ByteArray,
         baseName: String,
         format: ImageFormat,
-        subFolder: String = "PhotoFit"
+        subFolder: String = "PhotoFit",
+        originalDateTakenMs: Long? = null,
+        preserveOriginalDate: Boolean = true,
+        preserveExactName: Boolean = false
     ): Uri? {
         val resolver: ContentResolver = context.contentResolver
         val cleanName = baseName.substringBeforeLast(".")
-        val fileName = "${cleanName}_edited_${System.currentTimeMillis()}.${format.extension}"
+        val fileName = if (preserveExactName) {
+            "$cleanName.${format.extension}"
+        } else {
+            "${cleanName}_edited_${System.currentTimeMillis()}.${format.extension}"
+        }
+        val validDateMs = if (preserveOriginalDate && originalDateTakenMs != null && originalDateTakenMs > 0L) {
+            originalDateTakenMs
+        } else {
+            null
+        }
 
         val contentValues = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, format.mimeType)
+            if (validDateMs != null) {
+                put(MediaStore.Images.Media.DATE_TAKEN, validDateMs)
+                put(MediaStore.Images.Media.DATE_MODIFIED, validDateMs / 1000L)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/$subFolder")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -554,10 +634,39 @@ object ImageUtils {
                 stream.flush()
             }
 
+            // Preserve original capture/creation date in EXIF header (even when GPS/camera tags are wiped)
+            // so MediaScanner and Android Gallery apps sort compressed photos at their original timeline position.
+            if (validDateMs != null && (format == ImageFormat.JPEG || (format == ImageFormat.WEBP && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R))) {
+                try {
+                    val exifDateStr = formatExifDateTime(validDateMs)
+                    resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                        val exif = ExifInterface(pfd.fileDescriptor)
+                        exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDateStr)
+                        exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, exifDateStr)
+                        exif.setAttribute(ExifInterface.TAG_DATETIME, exifDateStr)
+                        exif.saveAttributes()
+                    }
+                } catch (_: Exception) {}
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 contentValues.clear()
                 contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                if (validDateMs != null) {
+                    contentValues.put(MediaStore.Images.Media.DATE_TAKEN, validDateMs)
+                    contentValues.put(MediaStore.Images.Media.DATE_MODIFIED, validDateMs / 1000L)
+                }
                 resolver.update(uri, contentValues, null, null)
+            }
+
+            if (validDateMs != null) {
+                try {
+                    val datePatch = ContentValues().apply {
+                        put(MediaStore.Images.Media.DATE_TAKEN, validDateMs)
+                        put(MediaStore.Images.Media.DATE_MODIFIED, validDateMs / 1000L)
+                    }
+                    resolver.update(uri, datePatch, null, null)
+                } catch (_: Exception) {}
             }
             return uri
         } catch (e: Exception) {
@@ -624,6 +733,174 @@ object ImageUtils {
         return null
     }
 
+    fun createWriteIntentRequest(
+        context: Context,
+        uris: List<Uri>
+    ): IntentSenderRequest? {
+        if (uris.isEmpty()) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val safeBatch = if (uris.size > MAX_DELETE_BATCH_SIZE) {
+                    uris.take(MAX_DELETE_BATCH_SIZE)
+                } else {
+                    uris
+                }
+                val pendingIntent: PendingIntent =
+                    MediaStore.createWriteRequest(context.contentResolver, safeBatch)
+                return IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return null
+    }
+
+    private val FILENAME_DATE_TIME_SEP_REGEX = Regex(
+        """(?:^|[^0-9])(199\d|20[0-3]\d)([-_.]?)([01]\d)\2([0-3]\d)[-_Tt .]+([0-2]\d)([-_.:]?)([0-5]\d)\6([0-5]\d)"""
+    )
+    private val FILENAME_DATE_TIME_COMPACT_REGEX = Regex(
+        """(?:^|[^0-9])(199\d|20[0-3]\d)([01]\d)([0-3]\d)([0-2]\d)([0-5]\d)([0-5]\d)(?:[^0-9]|$)"""
+    )
+    private val FILENAME_DATE_ONLY_REGEX = Regex(
+        """(?:^|[^0-9])(199\d|20[0-3]\d)([-_.]?)([01]\d)\2([0-3]\d)(?:[^0-9]|$)"""
+    )
+
+    private fun buildValidatedDateMillis(
+        year: Int,
+        month: Int,
+        day: Int,
+        hour: Int,
+        minute: Int,
+        second: Int
+    ): Long? {
+        if (year !in 1995..2035 || month !in 1..12 || day !in 1..31) return null
+        if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) return null
+        return try {
+            val cal = java.util.Calendar.getInstance().apply {
+                isLenient = false
+                set(year, month - 1, day, hour, minute, second)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            cal.timeInMillis
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun extractDateFromFileName(fileName: String): Long? {
+        val base = fileName.substringBeforeLast(".")
+        if (base.isBlank()) return null
+
+        FILENAME_DATE_TIME_SEP_REGEX.find(base)?.let { m ->
+            val yr = m.groupValues[1].toIntOrNull() ?: return@let
+            val mo = m.groupValues[3].toIntOrNull() ?: return@let
+            val dy = m.groupValues[4].toIntOrNull() ?: return@let
+            val hr = m.groupValues[5].toIntOrNull() ?: return@let
+            val mn = m.groupValues[7].toIntOrNull() ?: return@let
+            val sc = m.groupValues[8].toIntOrNull() ?: return@let
+            buildValidatedDateMillis(yr, mo, dy, hr, mn, sc)?.let { return it }
+        }
+
+        FILENAME_DATE_TIME_COMPACT_REGEX.find(base)?.let { m ->
+            val yr = m.groupValues[1].toIntOrNull() ?: return@let
+            val mo = m.groupValues[2].toIntOrNull() ?: return@let
+            val dy = m.groupValues[3].toIntOrNull() ?: return@let
+            val hr = m.groupValues[4].toIntOrNull() ?: return@let
+            val mn = m.groupValues[5].toIntOrNull() ?: return@let
+            val sc = m.groupValues[6].toIntOrNull() ?: return@let
+            buildValidatedDateMillis(yr, mo, dy, hr, mn, sc)?.let { return it }
+        }
+
+        FILENAME_DATE_ONLY_REGEX.find(base)?.let { m ->
+            val yr = m.groupValues[1].toIntOrNull() ?: return@let
+            val mo = m.groupValues[3].toIntOrNull() ?: return@let
+            val dy = m.groupValues[4].toIntOrNull() ?: return@let
+            buildValidatedDateMillis(yr, mo, dy, 12, 0, 0)?.let { return it }
+        }
+
+        return null
+    }
+
+    fun formatReadableDateTime(epochMs: Long): String {
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+        return sdf.format(java.util.Date(epochMs))
+    }
+
+    enum class MetadataUpdateResult {
+        SUCCESS,
+        NEEDS_WRITE_PERMISSION,
+        FAILED
+    }
+
+    fun updatePhotoTimestamps(
+        context: Context,
+        uri: Uri,
+        targetDateMs: Long,
+        mimeType: String = "image/jpeg"
+    ): MetadataUpdateResult {
+        if (targetDateMs <= 0L) return MetadataUpdateResult.FAILED
+        val resolver = context.contentResolver
+        var anyWriteSucceeded = false
+
+        val supportsExifWrite = mimeType.contains("jpeg", ignoreCase = true) ||
+            mimeType.contains("jpg", ignoreCase = true) ||
+            (mimeType.contains("webp", ignoreCase = true) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+
+        if (supportsExifWrite) {
+            try {
+                val exifDateStr = formatExifDateTime(targetDateMs)
+                resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                    val exif = ExifInterface(pfd.fileDescriptor)
+                    exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, exifDateStr)
+                    exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, exifDateStr)
+                    exif.setAttribute(ExifInterface.TAG_DATETIME, exifDateStr)
+                    exif.saveAttributes()
+                    anyWriteSucceeded = true
+                }
+            } catch (_: SecurityException) {
+                return MetadataUpdateResult.NEEDS_WRITE_PERMISSION
+            } catch (_: Exception) {
+                // Non-EXIF or unsupported container; continue with MediaStore timestamp update
+            }
+        }
+
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DATE_TAKEN, targetDateMs)
+                put(MediaStore.Images.Media.DATE_MODIFIED, targetDateMs / 1000L)
+            }
+            val updatedRows = resolver.update(uri, values, null, null)
+            if (updatedRows > 0) {
+                anyWriteSucceeded = true
+            }
+        } catch (_: SecurityException) {
+            return MetadataUpdateResult.NEEDS_WRITE_PERMISSION
+        } catch (_: Exception) {}
+
+        // Also update underlying file mtime & notify MediaScanner when file path is accessible
+        try {
+            @Suppress("DEPRECATION")
+            val dataColName = MediaStore.Images.Media.DATA
+            var filePath: String? = null
+            resolver.query(uri, arrayOf(dataColName), null, null, null)?.use { cursor ->
+                val idx = cursor.getColumnIndex(dataColName)
+                if (idx != -1 && cursor.moveToFirst() && !cursor.isNull(idx)) {
+                    filePath = cursor.getString(idx)
+                }
+            }
+            val resolvedPath = filePath
+            if (!resolvedPath.isNullOrBlank()) {
+                val file = File(resolvedPath)
+                if (file.exists() && file.canWrite()) {
+                    file.setLastModified(targetDateMs)
+                }
+                MediaScannerConnection.scanFile(context, arrayOf(resolvedPath), null, null)
+            }
+        } catch (_: Exception) {}
+
+        return if (anyWriteSucceeded) MetadataUpdateResult.SUCCESS else MetadataUpdateResult.FAILED
+    }
+
     fun deleteUrisDirectly(context: Context, uris: List<Uri>): Int {
         var count = 0
         for (uri in uris) {
@@ -643,7 +920,8 @@ object ImageUtils {
         val sizeBytes: Long,
         val width: Int,
         val height: Int,
-        val mimeType: String
+        val mimeType: String,
+        val dateTakenMs: Long = 0L
     )
 
     fun queryDevicePhotos(context: Context, limit: Int = Int.MAX_VALUE): List<Uri> {
@@ -662,9 +940,12 @@ object ImageUtils {
             MediaStore.Images.Media.WIDTH,
             MediaStore.Images.Media.HEIGHT,
             MediaStore.Images.Media.MIME_TYPE,
-            MediaStore.Images.Media.ORIENTATION
+            MediaStore.Images.Media.ORIENTATION,
+            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.DATE_MODIFIED,
+            MediaStore.Images.Media.DATE_ADDED
         )
-        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        val sortOrder = "${MediaStore.Images.Media.DATE_MODIFIED} DESC, ${MediaStore.Images.Media.DATE_ADDED} DESC"
         try {
             val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -685,6 +966,9 @@ object ImageUtils {
                 val heightCol = cursor.getColumnIndex(MediaStore.Images.Media.HEIGHT)
                 val mimeCol = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
                 val orientCol = cursor.getColumnIndex(MediaStore.Images.Media.ORIENTATION)
+                val takenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val modCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+                val addedCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
 
                 while (cursor.moveToNext() && items.size < limit) {
                     val id = cursor.getLong(idCol)
@@ -713,6 +997,16 @@ object ImageUtils {
                     } else {
                         "image/jpeg"
                     }
+                    val rawTaken = if (takenCol != -1 && !cursor.isNull(takenCol)) {
+                        cursor.getLong(takenCol)
+                    } else 0L
+                    val rawMod = if (modCol != -1 && !cursor.isNull(modCol)) {
+                        cursor.getLong(modCol)
+                    } else 0L
+                    val rawAdded = if (addedCol != -1 && !cursor.isNull(addedCol)) {
+                        cursor.getLong(addedCol)
+                    } else 0L
+                    val effectiveDateMs = resolveEffectiveDateMs(rawTaken, rawMod, rawAdded)
 
                     if (orientation == 90 || orientation == 270) {
                         val tmp = width
@@ -729,18 +1023,20 @@ object ImageUtils {
                             sizeBytes = size,
                             width = width,
                             height = height,
-                            mimeType = mime
+                            mimeType = mime,
+                            dateTakenMs = effectiveDateMs
                         )
                     )
                 }
             }
+            items.sortByDescending { it.dateTakenMs }
         } catch (e: Exception) {
             e.printStackTrace()
         }
         return items
     }
 
-    fun getExifDateFormatted(context: Context, uri: Uri): String {
+    fun getExifDateFormatted(context: Context, uri: Uri, fallbackDateMs: Long = 0L): String {
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 val exif = ExifInterface(input)
@@ -756,7 +1052,8 @@ object ImageUtils {
             }
         } catch (_: Exception) {}
         val sdf = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
-        return sdf.format(java.util.Date())
+        val fallbackDate = if (fallbackDateMs > 0L) java.util.Date(fallbackDateMs) else java.util.Date()
+        return sdf.format(fallbackDate)
     }
 
     fun getExifDetails(context: Context, uri: Uri): ExifDetails {
@@ -856,7 +1153,7 @@ object ImageUtils {
         return when (pattern) {
             com.example.model.RenamePattern.KEEP_ORIGINAL -> {
                 val clean = originalName.substringBeforeLast(".")
-                "${clean}_edited_${System.currentTimeMillis()}.${format.extension}"
+                "${clean}.${format.extension}"
             }
             com.example.model.RenamePattern.DATE_TIME -> {
                 "${dateStr}_${seqStr}.${format.extension}"

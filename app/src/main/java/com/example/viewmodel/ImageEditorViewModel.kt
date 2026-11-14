@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import androidx.activity.result.IntentSenderRequest
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -53,6 +54,22 @@ data class SingleEditUiState(
     val deleteOriginalPromptUris: List<Uri>? = null
 )
 
+data class DateRepairCandidate(
+    val id: String,
+    val uri: Uri,
+    val fileName: String,
+    val mimeType: String,
+    val parsedDateMs: Long
+)
+
+data class DateRepairPreview(
+    val totalChecked: Int,
+    val matchedCount: Int,
+    val skippedCount: Int,
+    val samples: List<Pair<String, Long>>,
+    val candidates: List<DateRepairCandidate>
+)
+
 data class BatchUiState(
     val items: List<BatchProcessItem> = emptyList(),
     val config: BatchConfig = BatchConfig(),
@@ -67,7 +84,14 @@ data class BatchUiState(
     val statusMessage: String? = null,
     val deleteOriginalPromptUris: List<Uri>? = null,
     val pendingDeleteQueue: List<Uri> = emptyList(),
-    val totalDeleteBatchCount: Int = 0
+    val totalDeleteBatchCount: Int = 0,
+    val dateRepairPreview: DateRepairPreview? = null,
+    val isRepairingDates: Boolean = false,
+    val writePermissionPromptUris: List<Uri>? = null,
+    val pendingWritePermissionQueue: List<DateRepairCandidate> = emptyList(),
+    val writePermissionPendingChunk: List<DateRepairCandidate> = emptyList(),
+    val totalWritePermissionCount: Int = 0,
+    val repairedDatesCount: Int = 0
 ) {
     val totalCount: Int get() = items.size
 
@@ -276,6 +300,12 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun updateSinglePreserveDate(preserve: Boolean) {
+        _singleState.update { state ->
+            state.copy(config = state.config.copy(preserveOriginalDate = preserve))
+        }
+    }
+
     fun updateWatermark(text: String, position: com.example.model.WatermarkPosition) {
         _singleState.update { s ->
             s.copy(config = s.config.copy(watermarkText = text, watermarkPosition = position))
@@ -399,9 +429,14 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                         ImageUtils.compressBitmap(watermarked, state.config.format, state.config.quality)
                     }
 
-                    // 5. Save to MediaStore Gallery
+                    // 5. Save to MediaStore Gallery (preserving original timeline date if enabled)
                     val resultUri = ImageUtils.saveBitmapToGallery(
-                        context, bytes, meta.name, state.config.format
+                        context = context,
+                        bytes = bytes,
+                        baseName = meta.name,
+                        format = state.config.format,
+                        originalDateTakenMs = meta.dateTakenMs,
+                        preserveOriginalDate = state.config.preserveOriginalDate
                     )
 
                     if (watermarked != resized && watermarked != adjusted) {
@@ -512,6 +547,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                         originalWidth = meta.width,
                         originalHeight = meta.height,
                         mimeType = meta.mimeType,
+                        originalDateTakenMs = meta.dateTakenMs,
                         status = BatchItemStatus.PENDING
                     )
                 }
@@ -574,7 +610,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun loadDevicePhotos(context: Context) {
+    fun loadDevicePhotos(context: Context, autoPrepareDateRepair: Boolean = false) {
         if (_batchState.value.isLoadingGallery) return
         viewModelScope.launch {
             _batchState.update {
@@ -594,6 +630,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                         originalWidth = entry.width,
                         originalHeight = entry.height,
                         mimeType = entry.mimeType,
+                        originalDateTakenMs = entry.dateTakenMs,
                         status = BatchItemStatus.PENDING
                     )
                 }
@@ -626,6 +663,9 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                             "새로 추가할 기기 사진이 없습니다."
                         }
                     )
+                }
+                if (autoPrepareDateRepair) {
+                    prepareDateRepairFromFilenames()
                 }
             } else {
                 _batchState.update {
@@ -709,10 +749,17 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
         if (state.items.isEmpty() || state.isProcessing) return
 
         // Process selected items or all if none selected
-        val itemsToProcess = if (state.items.any { it.isSelected }) {
+        val selectedItems = if (state.items.any { it.isSelected }) {
             state.items.filter { it.isSelected }
         } else {
             state.items
+        }
+        // Process oldest -> newest when preserving original date so even DATE_ADDED
+        // maintains the original chronological relative order alongside DATE_TAKEN & EXIF.
+        val itemsToProcess = if (state.config.preserveOriginalDate) {
+            selectedItems.sortedBy { it.originalDateTakenMs }
+        } else {
+            selectedItems
         }
 
         viewModelScope.launch {
@@ -792,7 +839,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
 
                         // Generate clean filename (only read EXIF date if pattern requires it)
                         val dateStr = if (config.renamePattern == com.example.model.RenamePattern.DATE_TIME) {
-                            ImageUtils.getExifDateFormatted(context, item.uri)
+                            ImageUtils.getExifDateFormatted(context, item.uri, item.originalDateTakenMs)
                         } else ""
                         val targetFileName = ImageUtils.generateTargetFileName(
                             config.renamePattern,
@@ -803,9 +850,16 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                             dateStr
                         )
 
-                        // Save to gallery
+                        // Save to gallery while preserving original capture/modified date & exact clean filename
                         val savedUri = ImageUtils.saveBitmapToGallery(
-                            context, bytes, targetFileName, targetFormat, "PhotoFit_Batch"
+                            context = context,
+                            bytes = bytes,
+                            baseName = targetFileName,
+                            format = targetFormat,
+                            subFolder = "PhotoFit_Batch",
+                            originalDateTakenMs = item.originalDateTakenMs,
+                            preserveOriginalDate = config.preserveOriginalDate,
+                            preserveExactName = true
                         )
 
                         if (finalBitmap != resized) {
@@ -973,6 +1027,308 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                 deleteOriginalPromptUris = null,
                 pendingDeleteQueue = emptyList(),
                 totalDeleteBatchCount = 0
+            )
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Filename-Based Original Date Recovery (EXIF & MediaStore)
+    // -------------------------------------------------------------
+
+    fun prepareDateRepairFromFilenames() {
+        val state = _batchState.value
+        if (state.items.isEmpty() || state.isProcessing || state.isRepairingDates) return
+
+        val targetItems = if (state.items.any { it.isSelected }) {
+            state.items.filter { it.isSelected }
+        } else {
+            state.items
+        }
+
+        viewModelScope.launch {
+            val preview = withContext(Dispatchers.Default) {
+                val candidates = ArrayList<DateRepairCandidate>(targetItems.size)
+                val samples = ArrayList<Pair<String, Long>>(3)
+                var skipped = 0
+
+                for (item in targetItems) {
+                    val parsed = ImageUtils.extractDateFromFileName(item.fileName)
+                    if (parsed != null) {
+                        candidates.add(
+                            DateRepairCandidate(
+                                id = item.id,
+                                uri = item.uri,
+                                fileName = item.fileName,
+                                mimeType = item.mimeType,
+                                parsedDateMs = parsed
+                            )
+                        )
+                        if (samples.size < 3) {
+                            samples.add(item.fileName to parsed)
+                        }
+                    } else {
+                        skipped++
+                    }
+                }
+
+                DateRepairPreview(
+                    totalChecked = targetItems.size,
+                    matchedCount = candidates.size,
+                    skippedCount = skipped,
+                    samples = samples,
+                    candidates = candidates
+                )
+            }
+
+            _batchState.update {
+                it.copy(dateRepairPreview = preview)
+            }
+        }
+    }
+
+    fun dismissDateRepairPreview() {
+        _batchState.update { it.copy(dateRepairPreview = null) }
+    }
+
+    fun executeDateRepair(context: Context) {
+        val state = _batchState.value
+        val preview = state.dateRepairPreview ?: return
+        if (preview.candidates.isEmpty() || state.isRepairingDates || state.isProcessing) {
+            _batchState.update { it.copy(dateRepairPreview = null) }
+            return
+        }
+
+        val candidates = preview.candidates
+        viewModelScope.launch {
+            _batchState.update {
+                it.copy(
+                    dateRepairPreview = null,
+                    isRepairingDates = true,
+                    currentProcessingIndex = 0,
+                    processingTargetCount = candidates.size,
+                    repairedDatesCount = 0,
+                    statusMessage = "파일명에서 읽은 촬영 날짜를 ${String.format("%,d", candidates.size)}장에 기록 중..."
+                )
+            }
+
+            val workingList = _batchState.value.items.toMutableList()
+            val indexById = HashMap<String, Int>(workingList.size)
+            for (i in workingList.indices) {
+                indexById[workingList[i].id] = i
+            }
+
+            val needsPermission = ArrayList<DateRepairCandidate>()
+            var updatedCount = 0
+            var failedCount = 0
+            var lastSyncMs = 0L
+
+            withContext(Dispatchers.IO) {
+                for (index in candidates.indices) {
+                    val candidate = candidates[index]
+                    when (ImageUtils.updatePhotoTimestamps(context, candidate.uri, candidate.parsedDateMs, candidate.mimeType)) {
+                        ImageUtils.MetadataUpdateResult.SUCCESS -> {
+                            updatedCount++
+                            val idx = indexById[candidate.id]
+                            if (idx != null) {
+                                workingList[idx] = workingList[idx].copy(originalDateTakenMs = candidate.parsedDateMs)
+                            }
+                        }
+                        ImageUtils.MetadataUpdateResult.NEEDS_WRITE_PERMISSION -> {
+                            needsPermission.add(candidate)
+                        }
+                        ImageUtils.MetadataUpdateResult.FAILED -> {
+                            failedCount++
+                        }
+                    }
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastSyncMs >= 200L || index == candidates.lastIndex) {
+                        lastSyncMs = now
+                        val snapshot = workingList.toList()
+                        _batchState.update { s ->
+                            s.copy(
+                                items = snapshot,
+                                currentProcessingIndex = index + 1
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (needsPermission.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                enqueueWritePermissionQueue(
+                    queue = needsPermission,
+                    updatedSoFar = updatedCount,
+                    workingItems = workingList
+                )
+            } else {
+                workingList.sortByDescending { it.originalDateTakenMs }
+                val sortedSnapshot = workingList.toList()
+                val totalFailed = failedCount + needsPermission.size
+                _batchState.update {
+                    it.copy(
+                        items = sortedSnapshot,
+                        isRepairingDates = false,
+                        currentProcessingIndex = candidates.size,
+                        repairedDatesCount = updatedCount,
+                        statusMessage = if (totalFailed > 0) {
+                            "${String.format("%,d", updatedCount)}장 날짜 복구 완료 (${totalFailed}장은 시스템 제한으로 건너뜀)"
+                        } else {
+                            "총 ${String.format("%,d", updatedCount)}장의 촬영·수정 날짜를 파일명 기준으로 복구했습니다!"
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun enqueueWritePermissionQueue(
+        queue: List<DateRepairCandidate>,
+        updatedSoFar: Int,
+        workingItems: List<BatchProcessItem>
+    ) {
+        val firstChunk = queue.take(ImageUtils.MAX_DELETE_BATCH_SIZE)
+        val remaining = if (queue.size > ImageUtils.MAX_DELETE_BATCH_SIZE) {
+            queue.drop(ImageUtils.MAX_DELETE_BATCH_SIZE)
+        } else {
+            emptyList()
+        }
+        _batchState.update {
+            it.copy(
+                items = workingItems,
+                isRepairingDates = false,
+                repairedDatesCount = updatedSoFar,
+                writePermissionPendingChunk = firstChunk,
+                writePermissionPromptUris = firstChunk.map { c -> c.uri },
+                pendingWritePermissionQueue = remaining,
+                totalWritePermissionCount = queue.size
+            )
+        }
+    }
+
+    fun getWriteIntentSenderRequest(context: Context, uris: List<Uri>): IntentSenderRequest? {
+        return ImageUtils.createWriteIntentRequest(context, uris)
+    }
+
+    fun onWritePermissionGranted(context: Context) {
+        val current = _batchState.value
+        val chunk = current.writePermissionPendingChunk
+        if (chunk.isEmpty()) {
+            dismissWritePermissionPrompt()
+            return
+        }
+
+        val remaining = current.pendingWritePermissionQueue
+        val priorUpdated = current.repairedDatesCount
+
+        viewModelScope.launch {
+            _batchState.update {
+                it.copy(
+                    writePermissionPromptUris = null,
+                    isRepairingDates = true,
+                    currentProcessingIndex = 0,
+                    processingTargetCount = chunk.size,
+                    statusMessage = "허용된 ${chunk.size}장의 EXIF·수정 날짜를 기록 중..."
+                )
+            }
+
+            val workingList = _batchState.value.items.toMutableList()
+            val indexById = HashMap<String, Int>(workingList.size)
+            for (i in workingList.indices) {
+                indexById[workingList[i].id] = i
+            }
+
+            var chunkUpdated = 0
+            var lastSyncMs = 0L
+
+            withContext(Dispatchers.IO) {
+                for (index in chunk.indices) {
+                    val candidate = chunk[index]
+                    val result = ImageUtils.updatePhotoTimestamps(
+                        context = context,
+                        uri = candidate.uri,
+                        targetDateMs = candidate.parsedDateMs,
+                        mimeType = candidate.mimeType
+                    )
+                    if (result == ImageUtils.MetadataUpdateResult.SUCCESS) {
+                        chunkUpdated++
+                        val idx = indexById[candidate.id]
+                        if (idx != null) {
+                            workingList[idx] = workingList[idx].copy(originalDateTakenMs = candidate.parsedDateMs)
+                        }
+                    }
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastSyncMs >= 200L || index == chunk.lastIndex) {
+                        lastSyncMs = now
+                        val snapshot = workingList.toList()
+                        _batchState.update { s ->
+                            s.copy(
+                                items = snapshot,
+                                currentProcessingIndex = index + 1
+                            )
+                        }
+                    }
+                }
+            }
+
+            val totalUpdated = priorUpdated + chunkUpdated
+            if (remaining.isNotEmpty()) {
+                val nextChunk = remaining.take(ImageUtils.MAX_DELETE_BATCH_SIZE)
+                val nextQueue = if (remaining.size > ImageUtils.MAX_DELETE_BATCH_SIZE) {
+                    remaining.drop(ImageUtils.MAX_DELETE_BATCH_SIZE)
+                } else {
+                    emptyList()
+                }
+                _batchState.update {
+                    it.copy(
+                        items = workingList.toList(),
+                        isRepairingDates = false,
+                        repairedDatesCount = totalUpdated,
+                        writePermissionPendingChunk = nextChunk,
+                        writePermissionPromptUris = nextChunk.map { c -> c.uri },
+                        pendingWritePermissionQueue = nextQueue,
+                        statusMessage = "${chunkUpdated}장 복구 완료 — 남은 ${remaining.size}장 수정 허용을 이어서 진행합니다."
+                    )
+                }
+            } else {
+                workingList.sortByDescending { it.originalDateTakenMs }
+                _batchState.update {
+                    it.copy(
+                        items = workingList.toList(),
+                        isRepairingDates = false,
+                        repairedDatesCount = totalUpdated,
+                        writePermissionPendingChunk = emptyList(),
+                        writePermissionPromptUris = null,
+                        pendingWritePermissionQueue = emptyList(),
+                        totalWritePermissionCount = 0,
+                        statusMessage = "총 ${String.format("%,d", totalUpdated)}장의 촬영·수정 날짜를 파일명 기준으로 복구했습니다!"
+                    )
+                }
+            }
+        }
+    }
+
+    fun dismissWritePermissionPrompt() {
+        val current = _batchState.value
+        val sorted = if (current.repairedDatesCount > 0) {
+            current.items.sortedByDescending { it.originalDateTakenMs }
+        } else {
+            current.items
+        }
+        _batchState.update {
+            it.copy(
+                items = sorted,
+                isRepairingDates = false,
+                writePermissionPromptUris = null,
+                pendingWritePermissionQueue = emptyList(),
+                writePermissionPendingChunk = emptyList(),
+                totalWritePermissionCount = 0,
+                statusMessage = if (current.repairedDatesCount > 0) {
+                    "${String.format("%,d", current.repairedDatesCount)}장의 날짜만 복구 후 나머지는 중단했습니다."
+                } else {
+                    "날짜 수정을 취소했습니다."
+                }
             )
         }
     }

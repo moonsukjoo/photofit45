@@ -49,13 +49,17 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -98,8 +102,11 @@ import com.example.model.BatchFormatChoice
 import com.example.model.BatchItemStatus
 import com.example.model.BatchProcessItem
 import com.example.model.ResizeMode
+import com.example.ui.components.CompressionQualitySelector
+import com.example.ui.components.LabeledSlider
 import com.example.ui.components.OptionSwitchCard
 import com.example.ui.components.SavingsBadge
+import kotlin.math.roundToInt
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.SuccessGreen
 import com.example.util.ImageUtils
@@ -115,6 +122,7 @@ fun BatchCompressScreen(
 ) {
     val context = LocalContext.current
     var showPermissionDeniedDialog by remember { mutableStateOf(false) }
+    var pendingAutoRepairAfterPermission by remember { mutableStateOf(false) }
 
     val batchPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia()
@@ -128,8 +136,10 @@ fun BatchCompressScreen(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
         if (hasGalleryReadPermission(context)) {
-            viewModel.loadDevicePhotos(context)
+            viewModel.loadDevicePhotos(context, autoPrepareDateRepair = pendingAutoRepairAfterPermission)
+            pendingAutoRepairAfterPermission = false
         } else {
+            pendingAutoRepairAfterPermission = false
             showPermissionDeniedDialog = true
         }
     }
@@ -166,6 +176,14 @@ fun BatchCompressScreen(
         )
     }
 
+    batchState.dateRepairPreview?.let { preview ->
+        DateRepairPreviewDialog(
+            preview = preview,
+            onConfirm = { viewModel.executeDateRepair(context) },
+            onDismiss = { viewModel.dismissDateRepairPreview() }
+        )
+    }
+
     if (batchState.items.isEmpty()) {
         BatchEmptyState(
             isLoadingGallery = batchState.isLoadingGallery,
@@ -176,8 +194,17 @@ fun BatchCompressScreen(
             },
             onLoadDevicePhotos = {
                 if (hasFullGalleryReadPermission(context)) {
-                    viewModel.loadDevicePhotos(context)
+                    viewModel.loadDevicePhotos(context, autoPrepareDateRepair = false)
                 } else {
+                    pendingAutoRepairAfterPermission = false
+                    galleryPermissionLauncher.launch(requiredGalleryPermissions())
+                }
+            },
+            onLoadAndRepairDates = {
+                if (hasFullGalleryReadPermission(context)) {
+                    viewModel.loadDevicePhotos(context, autoPrepareDateRepair = true)
+                } else {
+                    pendingAutoRepairAfterPermission = true
                     galleryPermissionLauncher.launch(requiredGalleryPermissions())
                 }
             },
@@ -213,6 +240,7 @@ private fun BatchEmptyState(
     isLoadingGallery: Boolean,
     onPickBatch: () -> Unit,
     onLoadDevicePhotos: () -> Unit,
+    onLoadAndRepairDates: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -225,23 +253,23 @@ private fun BatchEmptyState(
     ) {
         Box(
             modifier = Modifier
-                .size(100.dp)
+                .size(92.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.secondaryContainer),
+                .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = Icons.Default.AutoAwesomeMotion,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier.size(50.dp)
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(46.dp)
             )
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(18.dp))
 
         Text(
-            text = "사진 일괄 선택 및 용량 압축",
+            text = "갤러리 전체 사진 한 번에 용량 줄이기",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface,
@@ -251,26 +279,89 @@ private fun BatchEmptyState(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "여러 장의 고용량 사진을 선택하여 한 번에 원하는 화질로 압축하고,\n압축 완료 후 원본 사진을 삭제하여 기기 용량을 대폭 확보하세요.",
+            text = "1만~2만 장의 사진도 전체 선택해 원하는 강도로 줄이고,\n원본 날짜와 갤러리 순서는 그대로 지킬 수 있습니다.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
             lineHeight = 22.sp
         )
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
-        // Option 1: Multi Photo Picker
+        // 3-step visual guide strip
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                StepBadge("1", "전체 불러오기")
+                Text("→", color = MaterialTheme.colorScheme.outline, fontWeight = FontWeight.Bold)
+                StepBadge("2", "압축 강도 선택")
+                Text("→", color = MaterialTheme.colorScheme.outline, fontWeight = FontWeight.Bold)
+                StepBadge("3", "변환 & 원본 정리")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Primary CTA: Load Entire Device Gallery (Auto-selected)
         Button(
-            onClick = onPickBatch,
+            onClick = onLoadDevicePhotos,
+            enabled = !isLoadingGallery,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
-                .testTag("pick_batch_images_button"),
+                .height(56.dp)
+                .testTag("load_device_photos_button"),
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.primary
             )
+        ) {
+            if (isLoadingGallery) {
+                CircularProgressIndicator(
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "기기 갤러리 사진 불러오는 중...",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "기기 갤러리 전체 사진 불러오기 (자동 전체 선택)",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Secondary CTA: Pick Specific Photos Manually
+        OutlinedButton(
+            onClick = onPickBatch,
+            enabled = !isLoadingGallery,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .testTag("pick_batch_images_button"),
+            shape = RoundedCornerShape(16.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.AddPhotoAlternate,
@@ -279,49 +370,102 @@ private fun BatchEmptyState(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "갤러리에서 사진 다중 선택",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
+                text = "원하는 사진만 직접 골라 담기",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(18.dp))
 
-        // Option 2: Device Gallery All Photos
-        OutlinedButton(
-            onClick = onLoadDevicePhotos,
-            enabled = !isLoadingGallery,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .testTag("load_device_photos_button"),
-            shape = RoundedCornerShape(16.dp)
+        // Recovery Utility Card: Restore Dates from Filename
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.secondary.copy(alpha = 0.25f)
+            )
         ) {
-            if (isLoadingGallery) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Schedule,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "이미 압축한 사진 날짜·정렬이 뒤섞였나요?",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "기기 갤러리 사진 불러오는 중...",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold
+                    text = "IMG_20220501_142030 등 파일명에 날짜가 남아있다면 EXIF 촬영일과 갤러리 날짜 순서를 원래대로 되돌릴 수 있습니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 18.sp
                 )
-            } else {
-                Icon(
-                    imageVector = Icons.Default.FolderOpen,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "기기 갤러리 사진 전체 불러오기 (전체 선택 지원)",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Spacer(modifier = Modifier.height(10.dp))
+                FilledTonalButton(
+                    onClick = onLoadAndRepairDates,
+                    enabled = !isLoadingGallery,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("empty_repair_dates_button"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "파일명에서 촬영 날짜·정렬 복구하기",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun StepBadge(number: String, label: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = number,
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
 
@@ -355,21 +499,27 @@ private fun BatchWorkspace(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "총 ${String.format("%,d", batchState.items.size)}개 사진 (선택 ${String.format("%,d", batchState.selectedCount)}개)",
+                            text = if (batchState.isAllSelected) {
+                                "전체 ${String.format("%,d", batchState.items.size)}장 모두 선택됨"
+                            } else {
+                                "전체 ${String.format("%,d", batchState.items.size)}장 중 ${String.format("%,d", batchState.selectedCount)}장 선택"
+                            },
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "선택된 용량: ${ImageUtils.formatBytes(batchState.selectedOriginalBytes)}",
+                            text = "선택된 원본 용량: ${ImageUtils.formatBytes(batchState.selectedOriginalBytes)}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (!batchState.isProcessing) {
+                        if (!batchState.isProcessing && !batchState.isRepairingDates) {
                             OutlinedButton(
                                 onClick = onAddMore,
                                 shape = RoundedCornerShape(12.dp),
@@ -377,7 +527,7 @@ private fun BatchWorkspace(
                             ) {
                                 Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("추가", fontSize = 12.sp)
+                                Text("사진 추가", fontSize = 12.sp)
                             }
 
                             Spacer(modifier = Modifier.width(6.dp))
@@ -386,16 +536,16 @@ private fun BatchWorkspace(
                                 onClick = { viewModel.clearBatch() },
                                 modifier = Modifier.size(36.dp)
                             ) {
-                                Icon(Icons.Default.Clear, contentDescription = "전체 비우기", modifier = Modifier.size(20.dp))
+                                Icon(Icons.Default.Clear, contentDescription = "작업 목록 비우기", modifier = Modifier.size(20.dp))
                             }
                         }
                     }
                 }
 
-                // Selection Action Toolbar (전체 선택 / 전체 해제 / 선택 삭제)
+                // Easy Selection Action Toolbar (전체 선택 / 전체 해제 / 목록 제외)
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                 ) {
                     Row(
                         modifier = Modifier
@@ -404,65 +554,41 @@ private fun BatchWorkspace(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Master Checkbox: 전체 선택
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { viewModel.selectAllBatchItems(!batchState.isAllSelected) }
-                                .padding(end = 8.dp)
-                        ) {
-                            Checkbox(
-                                checked = batchState.isAllSelected,
-                                onCheckedChange = { viewModel.selectAllBatchItems(it) },
-                                colors = CheckboxDefaults.colors(
-                                    checkedColor = MaterialTheme.colorScheme.primary
-                                ),
-                                modifier = Modifier.size(36.dp)
-                            )
-                            Spacer(modifier = Modifier.width(2.dp))
-                            Text(
-                                text = if (batchState.isAllSelected) "전체 해제" else "전체 선택",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-
-                        // Quick buttons
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             FilledTonalButton(
                                 onClick = { viewModel.selectAllBatchItems(true) },
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                enabled = !batchState.isAllSelected && !batchState.isProcessing && !batchState.isRepairingDates,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 modifier = Modifier.testTag("select_all_button")
                             ) {
-                                Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(15.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("전체 선택", fontSize = 11.sp)
+                                Text("전체 선택", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
 
                             FilledTonalButton(
                                 onClick = { viewModel.selectAllBatchItems(false) },
-                                shape = RoundedCornerShape(8.dp),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                enabled = batchState.selectedCount > 0 && !batchState.isProcessing && !batchState.isRepairingDates,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 modifier = Modifier.testTag("deselect_all_button")
                             ) {
-                                Icon(Icons.Default.Deselect, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.Deselect, contentDescription = null, modifier = Modifier.size(15.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("전체 해제", fontSize = 11.sp)
+                                Text("선택 해제", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                             }
+                        }
 
-                            if (batchState.selectedCount > 0 && !batchState.isProcessing) {
-                                OutlinedButton(
-                                    onClick = { viewModel.removeSelectedBatchItems() },
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(14.dp), tint = ErrorRed)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("선택 제거", fontSize = 11.sp, color = ErrorRed)
-                                }
+                        if (batchState.selectedCount > 0 && !batchState.isProcessing && !batchState.isRepairingDates) {
+                            OutlinedButton(
+                                onClick = { viewModel.removeSelectedBatchItems() },
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(14.dp), tint = ErrorRed)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("목록 제외", fontSize = 11.sp, color = ErrorRed)
                             }
                         }
                     }
@@ -470,8 +596,8 @@ private fun BatchWorkspace(
             }
         }
 
-        // Processing Progress Bar (if processing)
-        if (batchState.isProcessing) {
+        // Processing / Date-Repair Progress Bar
+        if (batchState.isProcessing || batchState.isRepairingDates) {
             val targetTotal = if (batchState.processingTargetCount > 0) {
                 batchState.processingTargetCount
             } else {
@@ -492,7 +618,11 @@ private fun BatchWorkspace(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "${String.format("%,d", batchState.currentProcessingIndex)} / ${String.format("%,d", targetTotal)} 처리 중",
+                        text = if (batchState.isRepairingDates) {
+                            "${String.format("%,d", batchState.currentProcessingIndex)} / ${String.format("%,d", targetTotal)} 날짜 복구 중"
+                        } else {
+                            "${String.format("%,d", batchState.currentProcessingIndex)} / ${String.format("%,d", targetTotal)} 처리 중"
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
@@ -690,7 +820,7 @@ private fun BatchWorkspace(
                     item = item,
                     onToggleSelect = { viewModel.toggleBatchItemSelection(item.id) },
                     onRemove = { viewModel.removeBatchItem(item.id) },
-                    canRemove = !batchState.isProcessing
+                    canRemove = !batchState.isProcessing && !batchState.isRepairingDates
                 )
             }
 
@@ -713,7 +843,7 @@ private fun BatchWorkspace(
                 val buttonCount = if (batchState.selectedCount > 0) batchState.selectedCount else batchState.items.size
                 Button(
                     onClick = onStartProcessing,
-                    enabled = !batchState.isProcessing && batchState.items.isNotEmpty(),
+                    enabled = !batchState.isProcessing && !batchState.isRepairingDates && batchState.items.isNotEmpty(),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(54.dp)
@@ -739,7 +869,11 @@ private fun BatchWorkspace(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (batchState.isCompleted) "다시 일괄 압축하기" else "${String.format("%,d", buttonCount)}개 사진 일괄 압축 시작",
+                            text = when {
+                                batchState.isCompleted -> "다시 일괄 압축하기"
+                                batchState.isAllSelected -> "전체 ${String.format("%,d", buttonCount)}장 한 번에 압축 시작"
+                                else -> "선택한 ${String.format("%,d", buttonCount)}장 압축 시작"
+                            },
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -756,6 +890,20 @@ private fun BatchConfigCard(
     batchState: BatchUiState
 ) {
     val config = batchState.config
+    var showAdvancedOptions by remember { mutableStateOf(false) }
+
+    val formatLabel = when (config.formatChoice) {
+        BatchFormatChoice.KEEP_ORIGINAL -> "원본 포맷"
+        BatchFormatChoice.WEBP -> "WEBP"
+        BatchFormatChoice.JPEG -> "JPEG"
+        BatchFormatChoice.PNG -> "PNG"
+    }
+    val resizeLabel = when (config.resizeMode) {
+        ResizeMode.ORIGINAL -> "원본 크기"
+        ResizeMode.PERCENT_75 -> "75% 축소"
+        ResizeMode.PERCENT_50 -> "50% 축소"
+        else -> config.resizeMode.displayName
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -770,7 +918,7 @@ private fun BatchConfigCard(
                 .padding(16.dp)
         ) {
             Text(
-                text = "일괄 압축 설정",
+                text = "간편 일괄 변환 설정",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
@@ -778,188 +926,330 @@ private fun BatchConfigCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Quality Presets
+            // 1. Quality Presets (최하 / 중간 / 최대 압축 + 예상 용량 예시)
             Text(
-                text = "압축 품질 (Quality)",
+                text = "1. 얼마나 줄일까요? (압축 강도 선택)",
                 style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    Pair(90, "90% 고화질"),
-                    Pair(75, "75% 권장"),
-                    Pair(50, "50% 알뜰"),
-                    Pair(30, "30% 초소형")
-                ).forEach { (q, label) ->
-                    FilterChip(
-                        selected = config.quality == q,
-                        onClick = { viewModel.updateBatchConfig(config.copy(quality = q)) },
-                        label = { Text(label, fontSize = 11.sp) },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
+            Spacer(modifier = Modifier.height(8.dp))
+            CompressionQualitySelector(
+                selectedQuality = config.quality,
+                onQualitySelected = { q -> viewModel.updateBatchConfig(config.copy(quality = q)) }
+            )
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Format Selection
+            // 2. Essential Options (Date Preserve + Delete Original)
             Text(
-                text = "변환 포맷",
+                text = "2. 날짜 · 원본 파일 처리",
                 style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                BatchFormatChoice.entries.forEach { choice ->
-                    FilterChip(
-                        selected = config.formatChoice == choice,
-                        onClick = { viewModel.updateBatchConfig(config.copy(formatChoice = choice)) },
-                        label = {
-                            Text(
-                                text = when (choice) {
-                                    BatchFormatChoice.KEEP_ORIGINAL -> "원본 유지"
-                                    BatchFormatChoice.WEBP -> "WEBP (추천)"
-                                    BatchFormatChoice.JPEG -> "JPEG"
-                                    BatchFormatChoice.PNG -> "PNG"
-                                },
-                                fontSize = 11.sp
-                            )
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
+            Spacer(modifier = Modifier.height(8.dp))
 
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Resize Scale
-            Text(
-                text = "해상도 축소 비율 및 소셜 규격",
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            LazyRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val modes = listOf(
-                    Pair(ResizeMode.ORIGINAL, "100% 원본"),
-                    Pair(ResizeMode.PERCENT_75, "75% 축소"),
-                    Pair(ResizeMode.PERCENT_50, "50% 축소"),
-                    Pair(ResizeMode.FHD_1080P, "1080p FHD"),
-                    Pair(ResizeMode.INSTA_FEED, "인스타 (1080px)"),
-                    Pair(ResizeMode.KAKAO_PROFILE, "카카오 (640px)"),
-                    Pair(ResizeMode.WEB_THUMB, "웹 썸네일 (500px)")
-                )
-                items(modes) { (mode, label) ->
-                    FilterChip(
-                        selected = config.resizeMode == mode,
-                        onClick = { viewModel.updateBatchConfig(config.copy(resizeMode = mode)) },
-                        label = { Text(label, fontSize = 11.sp) }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Smart Renamer Pattern (User requested interest in batch renaming)
-            Text(
-                text = "파일명 일괄 정리 패턴 (Smart Renamer)",
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            LazyRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(com.example.model.RenamePattern.entries) { pattern ->
-                    FilterChip(
-                        selected = config.renamePattern == pattern,
-                        onClick = { viewModel.updateBatchConfig(config.copy(renamePattern = pattern)) },
-                        label = { Text(pattern.displayName, fontSize = 11.sp) }
-                    )
-                }
-            }
-
-            if (config.renamePattern == com.example.model.RenamePattern.CUSTOM_PREFIX) {
-                Spacer(modifier = Modifier.height(8.dp))
-                androidx.compose.material3.OutlinedTextField(
-                    value = config.customPrefix,
-                    onValueChange = { viewModel.updateBatchConfig(config.copy(customPrefix = it)) },
-                    label = { Text("파일명 접두사 (예: 제주여행, 상품, 영수증)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Batch Watermark
-            Text(
-                text = "일괄 워터마크 서명 (선택)",
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            androidx.compose.material3.OutlinedTextField(
-                value = config.watermarkText,
-                onValueChange = { viewModel.updateBatchConfig(config.copy(watermarkText = it)) },
-                label = { Text("워터마크 텍스트 (미입력 시 워터마크 없음)") },
-                placeholder = { Text("예: © PhotoFit, 닉네임, 상호명") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            )
-
-            if (config.watermarkText.isNotBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(com.example.model.WatermarkPosition.entries) { pos ->
-                        FilterChip(
-                            selected = config.watermarkPosition == pos,
-                            onClick = { viewModel.updateBatchConfig(config.copy(watermarkPosition = pos)) },
-                            label = { Text(pos.displayName, fontSize = 11.sp) }
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Privacy EXIF Wiper
+            // Preserve Original Capture/File Date & Gallery Sort Order
             OptionSwitchCard(
-                title = "개인정보 보호: GPS 위치 및 EXIF 메타데이터 제거",
-                subtitle = "사진에 담긴 촬영 장소 GPS 좌표, 촬영 기기 정보 등을 안전하게 삭제하여 업로드 시 사생활을 보호합니다.",
-                checked = config.removeExifMetadata,
-                onCheckedChange = { viewModel.updateBatchConfig(config.copy(removeExifMetadata = it)) },
-                icon = Icons.Default.Shield
+                title = "원본 촬영·생성 날짜 유지 (갤러리 정렬 유지)",
+                subtitle = "압축된 사진에 원본 날짜·시간 순서를 그대로 기록해 옛날 사진이 최신 날짜로 올라오지 않게 합니다.",
+                checked = config.preserveOriginalDate,
+                onCheckedChange = { viewModel.updateBatchConfig(config.copy(preserveOriginalDate = it)) },
+                highlight = true,
+                icon = Icons.Default.Schedule,
+                testTag = "batch_preserve_date_toggle"
             )
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Delete Original Toggle
             OptionSwitchCard(
-                title = "처리 완료 시 자동으로 원본 삭제 요청",
-                subtitle = "압축 저장이 끝나면 자동으로 시스템 원본 삭제 동의 팝업이 표시됩니다. (완료 후 수동 삭제도 가능)",
+                title = "압축 완료 후 원본 자동 삭제 요청",
+                subtitle = "새 압축 파일 저장이 끝난 뒤 원본 삭제 확인 창을 띄워 기기 용량을 바로 확보합니다.",
                 checked = config.deleteOriginal,
                 onCheckedChange = { viewModel.updateBatchConfig(config.copy(deleteOriginal = it)) },
                 highlight = true,
                 icon = Icons.Default.DeleteOutline,
                 testTag = "batch_delete_original_toggle"
             )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Filename -> EXIF/MediaStore Date Recovery Tool
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "이미 압축한 사진: 파일명으로 원본 날짜 복구",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "IMG_20220501_142030 등 파일명 속 날짜를 읽어 EXIF 촬영일·수정일을 다시 써서 갤러리 순서를 되돌립니다.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    FilledTonalButton(
+                        onClick = { viewModel.prepareDateRepairFromFilenames() },
+                        enabled = !batchState.isProcessing && !batchState.isRepairingDates,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .testTag("repair_dates_from_filename_button")
+                    ) {
+                        Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (batchState.selectedCount > 0) {
+                                "선택한 ${String.format("%,d", batchState.selectedCount)}장 날짜 복구 검사"
+                            } else {
+                                "전체 목록 날짜 복구 검사"
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 3. Collapsible Advanced Options Accordion
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { showAdvancedOptions = !showAdvancedOptions },
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "세부 설정 (포맷 · 크기 · 파일명 · 워터마크)",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "$formatLabel · $resizeLabel · ${config.renamePattern.displayName}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Icon(
+                        imageVector = if (showAdvancedOptions) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (showAdvancedOptions) "세부 설정 접기" else "세부 설정 펼치기",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = showAdvancedOptions) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 14.dp)
+                ) {
+                    LabeledSlider(
+                        label = "세부 화질 직접 조절 (높을수록 고화질·큰 용량)",
+                        value = config.quality.toFloat(),
+                        onValueChange = { viewModel.updateBatchConfig(config.copy(quality = it.roundToInt())) },
+                        valueRange = 10f..100f,
+                        unit = "%",
+                        defaultValue = 75f,
+                        onReset = { viewModel.updateBatchConfig(config.copy(quality = 75)) }
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Format Selection
+                    Text(
+                        text = "변환 포맷",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        BatchFormatChoice.entries.forEach { choice ->
+                            FilterChip(
+                                selected = config.formatChoice == choice,
+                                onClick = { viewModel.updateBatchConfig(config.copy(formatChoice = choice)) },
+                                label = {
+                                    Text(
+                                        text = when (choice) {
+                                            BatchFormatChoice.KEEP_ORIGINAL -> "원본 유지"
+                                            BatchFormatChoice.WEBP -> "WEBP (추천)"
+                                            BatchFormatChoice.JPEG -> "JPEG"
+                                            BatchFormatChoice.PNG -> "PNG"
+                                        },
+                                        fontSize = 11.sp
+                                    )
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Resize Scale
+                    Text(
+                        text = "해상도 축소 비율 및 소셜 규격",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val modes = listOf(
+                            Pair(ResizeMode.ORIGINAL, "100% 원본"),
+                            Pair(ResizeMode.PERCENT_75, "75% 축소"),
+                            Pair(ResizeMode.PERCENT_50, "50% 축소"),
+                            Pair(ResizeMode.FHD_1080P, "1080p FHD"),
+                            Pair(ResizeMode.INSTA_FEED, "인스타 (1080px)"),
+                            Pair(ResizeMode.KAKAO_PROFILE, "카카오 (640px)"),
+                            Pair(ResizeMode.WEB_THUMB, "웹 썸네일 (500px)")
+                        )
+                        items(modes) { (mode, label) ->
+                            FilterChip(
+                                selected = config.resizeMode == mode,
+                                onClick = { viewModel.updateBatchConfig(config.copy(resizeMode = mode)) },
+                                label = { Text(label, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Smart Renamer Pattern
+                    Text(
+                        text = "파일명 일괄 정리 패턴",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(com.example.model.RenamePattern.entries) { pattern ->
+                            FilterChip(
+                                selected = config.renamePattern == pattern,
+                                onClick = { viewModel.updateBatchConfig(config.copy(renamePattern = pattern)) },
+                                label = { Text(pattern.displayName, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+
+                    if (config.renamePattern == com.example.model.RenamePattern.CUSTOM_PREFIX) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        androidx.compose.material3.OutlinedTextField(
+                            value = config.customPrefix,
+                            onValueChange = { viewModel.updateBatchConfig(config.copy(customPrefix = it)) },
+                            label = { Text("파일명 접두사 (예: 제주여행, 상품, 영수증)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Batch Watermark
+                    Text(
+                        text = "일괄 워터마크 서명 (선택)",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = config.watermarkText,
+                        onValueChange = { viewModel.updateBatchConfig(config.copy(watermarkText = it)) },
+                        label = { Text("워터마크 텍스트 (미입력 시 워터마크 없음)") },
+                        placeholder = { Text("예: © PhotoFit, 닉네임, 상호명") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    if (config.watermarkText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(com.example.model.WatermarkPosition.entries) { pos ->
+                                FilterChip(
+                                    selected = config.watermarkPosition == pos,
+                                    onClick = { viewModel.updateBatchConfig(config.copy(watermarkPosition = pos)) },
+                                    label = { Text(pos.displayName, fontSize = 11.sp) }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Privacy EXIF Wiper
+                    OptionSwitchCard(
+                        title = "개인정보 보호: GPS 위치 및 기기 정보 제거",
+                        subtitle = "사진에 담긴 촬영 장소 GPS 좌표와 카메라 기종 정보 등을 안전하게 삭제합니다. (날짜 유지를 켜면 촬영 날짜만 보존됩니다)",
+                        checked = config.removeExifMetadata,
+                        onCheckedChange = { viewModel.updateBatchConfig(config.copy(removeExifMetadata = it)) },
+                        icon = Icons.Default.Shield
+                    )
+                }
+            }
         }
     }
 }
@@ -1034,15 +1324,26 @@ private fun BatchItemCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
-                val metaLine = if (item.originalWidth > 0 && item.originalHeight > 0) {
-                    "${item.originalWidth}×${item.originalHeight} • ${ImageUtils.formatBytes(item.originalSizeBytes)}"
-                } else {
-                    ImageUtils.formatBytes(item.originalSizeBytes)
+                val dateLabel = remember(item.originalDateTakenMs) {
+                    if (item.originalDateTakenMs > 0L) {
+                        ImageUtils.formatReadableDateTime(item.originalDateTakenMs).take(16)
+                    } else null
+                }
+                val metaLine = buildString {
+                    if (item.originalWidth > 0 && item.originalHeight > 0) {
+                        append("${item.originalWidth}×${item.originalHeight} • ")
+                    }
+                    append(ImageUtils.formatBytes(item.originalSizeBytes))
+                    if (dateLabel != null) {
+                        append(" • $dateLabel")
+                    }
                 }
                 Text(
                     text = metaLine,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
 
                 // Processed size & Savings badge
@@ -1145,4 +1446,131 @@ private fun requiredGalleryPermissions(): Array<String> {
             Manifest.permission.READ_EXTERNAL_STORAGE
         )
     }
+}
+
+@Composable
+private fun DateRepairPreviewDialog(
+    preview: com.example.viewmodel.DateRepairPreview,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Default.Schedule,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(32.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "파일명에서 촬영 날짜 복구",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "• 검사 대상: ${String.format("%,d", preview.totalChecked)}장",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = "• 날짜 추출 가능: ${String.format("%,d", preview.matchedCount)}장",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (preview.matchedCount > 0) SuccessGreen else ErrorRed
+                        )
+                        if (preview.skippedCount > 0) {
+                            Text(
+                                text = "• 날짜 형식 없음 (건너뜀): ${String.format("%,d", preview.skippedCount)}장",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                if (preview.matchedCount > 0) {
+                    Text(
+                        text = "인식 예시 (미리보기)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        preview.samples.forEach { (name, dateMs) ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                                    Text(
+                                        text = name,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "→ ${ImageUtils.formatReadableDateTime(dateMs)}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        text = "EXIF 촬영일과 갤러리 수정일을 파일명 날짜로 다시 기록합니다. (안드로이드 보안상 다른 앱/이전 버전 파일은 500장씩 수정 허용 팝업이 표시될 수 있습니다)",
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "IMG_20220501_142030, 20220501_..., KakaoTalk_20240315_... 처럼 파일명에 날짜가 포함된 사진만 복구할 수 있습니다.\n\n'PhotoFit_001'처럼 날짜 정보가 없는 파일명은 복구할 수 없습니다.",
+                        style = MaterialTheme.typography.bodySmall,
+                        lineHeight = 18.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            if (preview.matchedCount > 0) {
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier.testTag("confirm_repair_dates_button")
+                ) {
+                    Text(
+                        text = "${String.format("%,d", preview.matchedCount)}장 날짜 복구 시작",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            } else {
+                TextButton(onClick = onDismiss) {
+                    Text("확인")
+                }
+            }
+        },
+        dismissButton = {
+            if (preview.matchedCount > 0) {
+                TextButton(onClick = onDismiss) {
+                    Text("취소")
+                }
+            }
+        }
+    )
 }

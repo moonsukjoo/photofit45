@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.AutoAwesomeMotion
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
@@ -145,6 +146,17 @@ fun MainAppScreen(
         }
     }
 
+    // Activity result launcher for Scoped Storage write permission request (Android 11+)
+    val writeIntentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            viewModel.onWritePermissionGranted(context)
+        } else {
+            viewModel.dismissWritePermissionPrompt()
+        }
+    }
+
     // Show status messages as snackbars
     LaunchedEffect(singleState.statusMessage) {
         singleState.statusMessage?.let { msg ->
@@ -154,7 +166,7 @@ fun MainAppScreen(
 
     LaunchedEffect(batchState.statusMessage) {
         batchState.statusMessage?.let { msg ->
-            if (!batchState.isProcessing) {
+            if (!batchState.isProcessing && !batchState.isRepairingDates) {
                 snackbarHostState.showSnackbar(msg)
             }
         }
@@ -241,6 +253,85 @@ fun MainAppScreen(
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissDeletePrompt() }) {
                     Text(if (isBatchChunked && alreadyDone > 0) "나머지 중단" else "원본 유지 (취소)")
+                }
+            }
+        )
+    }
+
+    // Pending Scoped Storage write permission request for filename-based date recovery
+    val pendingWriteUris = batchState.writePermissionPromptUris
+    if (pendingWriteUris != null && pendingWriteUris.isNotEmpty()) {
+        val isWriteChunked = batchState.totalWritePermissionCount > pendingWriteUris.size
+        val remainingWriteAfterThis = batchState.pendingWritePermissionQueue.size
+        val alreadyWritePrompted = if (isWriteChunked) {
+            (batchState.totalWritePermissionCount - pendingWriteUris.size - remainingWriteAfterThis).coerceAtLeast(0)
+        } else 0
+
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissWritePermissionPrompt() },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = if (isWriteChunked && alreadyWritePrompted > 0) {
+                        "사진 날짜 수정 허용 (${String.format("%,d", alreadyWritePrompted)}/${String.format("%,d", batchState.totalWritePermissionCount)}장)"
+                    } else {
+                        "사진 파일 수정 허용 필요"
+                    },
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                val message = if (isWriteChunked) {
+                    "다른 앱이나 이전 버전에서 저장된 사진의 촬영·수정 날짜를 바꾸려면 안드로이드 보안상 수정 허용이 필요합니다.\n\n" +
+                        "시스템 제한에 따라 한 번에 최대 ${ImageUtils.MAX_DELETE_BATCH_SIZE}장씩 나누어 진행합니다.\n" +
+                        "• 수정 허용 필요: ${String.format("%,d", batchState.totalWritePermissionCount)}장\n" +
+                        "• 이번 허용 요청: ${pendingWriteUris.size}장\n" +
+                        "• 남은 대기: ${String.format("%,d", remainingWriteAfterThis)}장"
+                } else {
+                    "다른 앱이나 이전 버전에서 저장된 사진 ${pendingWriteUris.size}장의 EXIF 촬영일·수정일을 덮어쓰려면 시스템 수정 허용이 필요합니다."
+                }
+                Text(
+                    text = message,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            val request = viewModel.getWriteIntentSenderRequest(context, pendingWriteUris)
+                            if (request != null) {
+                                writeIntentLauncher.launch(request)
+                            } else {
+                                viewModel.dismissWritePermissionPrompt()
+                            }
+                        } else {
+                            viewModel.dismissWritePermissionPrompt()
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_write_permission_button")
+                ) {
+                    Text(
+                        text = if (isWriteChunked && alreadyWritePrompted > 0) {
+                            "다음 ${pendingWriteUris.size}장 수정 허용"
+                        } else {
+                            "수정 허용하기"
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissWritePermissionPrompt() }) {
+                    Text(if (isWriteChunked && alreadyWritePrompted > 0) "나머지 중단" else "취소")
                 }
             }
         )
