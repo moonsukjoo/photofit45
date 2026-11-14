@@ -80,5 +80,27 @@ class ExampleUnitTest {
             "20261112_143000"
         )
         assertEquals("제주여행_003.png", prefixFileName)
+
+        val largeBatchName = ImageUtils.generateTargetFileName(
+            com.example.model.RenamePattern.CLEAN_SIMPLE,
+            "",
+            "photo.jpg",
+            19999,
+            ImageFormat.WEBP,
+            ""
+        )
+        assertEquals("PhotoFit_20000.webp", largeBatchName)
+    }
+
+    @Test
+    fun testChunkItemsForLargeBatchDeletion() {
+        val twentyThousand = (1..20000).toList()
+        val chunks = ImageUtils.chunkItems(twentyThousand)
+        assertEquals(40, chunks.size)
+        assertEquals(ImageUtils.MAX_DELETE_BATCH_SIZE, chunks.first().size)
+        assertEquals(ImageUtils.MAX_DELETE_BATCH_SIZE, chunks.last().size)
+        assertEquals(20000, chunks.sumOf { it.size })
+
+        assertTrue(ImageUtils.chunkItems(emptyList<Int>()).isEmpty())
     }
 }

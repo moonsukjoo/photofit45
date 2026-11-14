@@ -594,6 +594,14 @@ object ImageUtils {
         }
     }
 
+    const val MAX_DELETE_BATCH_SIZE = 500
+
+    fun <T> chunkItems(items: List<T>, chunkSize: Int = MAX_DELETE_BATCH_SIZE): List<List<T>> {
+        if (items.isEmpty()) return emptyList()
+        val safeSize = max(1, chunkSize)
+        return items.chunked(safeSize)
+    }
+
     fun createDeleteIntentRequest(
         context: Context,
         uris: List<Uri>
@@ -601,8 +609,13 @@ object ImageUtils {
         if (uris.isEmpty()) return null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
+                val safeBatch = if (uris.size > MAX_DELETE_BATCH_SIZE) {
+                    uris.take(MAX_DELETE_BATCH_SIZE)
+                } else {
+                    uris
+                }
                 val pendingIntent: PendingIntent =
-                    MediaStore.createDeleteRequest(context.contentResolver, uris)
+                    MediaStore.createDeleteRequest(context.contentResolver, safeBatch)
                 return IntentSenderRequest.Builder(pendingIntent.intentSender).build()
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -633,11 +646,14 @@ object ImageUtils {
         val mimeType: String
     )
 
-    fun queryDevicePhotos(context: Context, limit: Int = 500): List<Uri> {
+    fun queryDevicePhotos(context: Context, limit: Int = Int.MAX_VALUE): List<Uri> {
         return queryDevicePhotosWithMetadata(context, limit).map { it.uri }
     }
 
-    fun queryDevicePhotosWithMetadata(context: Context, limit: Int = 500): List<DevicePhotoEntry> {
+    fun queryDevicePhotosWithMetadata(
+        context: Context,
+        limit: Int = Int.MAX_VALUE
+    ): List<DevicePhotoEntry> {
         val items = mutableListOf<DevicePhotoEntry>()
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
@@ -680,12 +696,20 @@ object ImageUtils {
                     } else {
                         "image_$id.jpg"
                     }
-                    val size = if (sizeCol != -1 && !cursor.isNull(sizeCol)) cursor.getLong(sizeCol) else 0L
-                    var width = if (widthCol != -1 && !cursor.isNull(widthCol)) cursor.getInt(widthCol) else 0
-                    var height = if (heightCol != -1 && !cursor.isNull(heightCol)) cursor.getInt(heightCol) else 0
-                    val orientation = if (orientCol != -1 && !cursor.isNull(orientCol)) cursor.getInt(orientCol) else 0
+                    val size = if (sizeCol != -1 && !cursor.isNull(sizeCol)) {
+                        max(0L, cursor.getLong(sizeCol))
+                    } else 0L
+                    var width = if (widthCol != -1 && !cursor.isNull(widthCol)) {
+                        max(0, cursor.getInt(widthCol))
+                    } else 0
+                    var height = if (heightCol != -1 && !cursor.isNull(heightCol)) {
+                        max(0, cursor.getInt(heightCol))
+                    } else 0
+                    val orientation = if (orientCol != -1 && !cursor.isNull(orientCol)) {
+                        cursor.getInt(orientCol)
+                    } else 0
                     val mime = if (mimeCol != -1 && !cursor.isNull(mimeCol)) {
-                        cursor.getString(mimeCol)
+                        cursor.getString(mimeCol) ?: "image/jpeg"
                     } else {
                         "image/jpeg"
                     }
@@ -696,30 +720,18 @@ object ImageUtils {
                         height = tmp
                     }
 
-                    if (width <= 0 || height <= 0 || size <= 0L) {
-                        val fallback = getImageMetadata(context, contentUri)
-                        items.add(
-                            DevicePhotoEntry(
-                                uri = contentUri,
-                                name = fallback.name,
-                                sizeBytes = fallback.sizeBytes,
-                                width = fallback.width,
-                                height = fallback.height,
-                                mimeType = fallback.mimeType
-                            )
+                    // Fast MediaStore-only metadata read (no per-file stream open)
+                    // so loading 10,000~20,000+ gallery photos stays instantaneous.
+                    items.add(
+                        DevicePhotoEntry(
+                            uri = contentUri,
+                            name = name,
+                            sizeBytes = size,
+                            width = width,
+                            height = height,
+                            mimeType = mime
                         )
-                    } else {
-                        items.add(
-                            DevicePhotoEntry(
-                                uri = contentUri,
-                                name = name,
-                                sizeBytes = size,
-                                width = width,
-                                height = height,
-                                mimeType = mime
-                            )
-                        )
-                    }
+                    )
                 }
             }
         } catch (e: Exception) {

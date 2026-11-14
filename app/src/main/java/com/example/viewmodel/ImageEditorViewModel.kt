@@ -56,28 +56,76 @@ data class SingleEditUiState(
 data class BatchUiState(
     val items: List<BatchProcessItem> = emptyList(),
     val config: BatchConfig = BatchConfig(),
+    val isLoadingGallery: Boolean = false,
     val isProcessing: Boolean = false,
     val currentProcessingIndex: Int = 0,
+    val processingTargetCount: Int = 0,
     val totalOriginalBytes: Long = 0L,
+    val processedOriginalBytes: Long = 0L,
     val totalProcessedBytes: Long = 0L,
     val isCompleted: Boolean = false,
     val statusMessage: String? = null,
-    val deleteOriginalPromptUris: List<Uri>? = null
+    val deleteOriginalPromptUris: List<Uri>? = null,
+    val pendingDeleteQueue: List<Uri> = emptyList(),
+    val totalDeleteBatchCount: Int = 0
 ) {
     val totalCount: Int get() = items.size
-    val selectedCount: Int get() = items.count { it.isSelected }
-    val isAllSelected: Boolean get() = items.isNotEmpty() && items.all { it.isSelected }
-    val selectedOriginalBytes: Long get() = items.filter { it.isSelected }.sumOf { it.originalSizeBytes }
-    val completedCount: Int get() = items.count { it.status == BatchItemStatus.COMPLETED }
+
+    val selectedCount: Int
+        get() {
+            var count = 0
+            for (item in items) {
+                if (item.isSelected) count++
+            }
+            return count
+        }
+
+    val isAllSelected: Boolean
+        get() {
+            if (items.isEmpty()) return false
+            for (item in items) {
+                if (!item.isSelected) return false
+            }
+            return true
+        }
+
+    val selectedOriginalBytes: Long
+        get() {
+            var sum = 0L
+            for (item in items) {
+                if (item.isSelected) sum += item.originalSizeBytes
+            }
+            return sum
+        }
+
+    val completedCount: Int
+        get() {
+            var count = 0
+            for (item in items) {
+                if (item.status == BatchItemStatus.COMPLETED) count++
+            }
+            return count
+        }
+
+    val comparisonOriginalBytes: Long
+        get() = if (processedOriginalBytes > 0L) processedOriginalBytes else totalOriginalBytes
+
     val totalSavedBytes: Long
-        get() = if (totalProcessedBytes in 1 until totalOriginalBytes) {
-            totalOriginalBytes - totalProcessedBytes
-        } else 0L
+        get() {
+            val base = comparisonOriginalBytes
+            return if (totalProcessedBytes in 1 until base) {
+                base - totalProcessedBytes
+            } else 0L
+        }
+
     val overallSavingsPercent: Int
-        get() = if (totalOriginalBytes > 0 && totalProcessedBytes > 0) {
-            val p = (1.0 - (totalProcessedBytes.toDouble() / totalOriginalBytes.toDouble())) * 100
-            p.coerceAtLeast(0.0).toInt()
-        } else 0
+        get() {
+            val base = comparisonOriginalBytes
+            return if (base > 0 && totalProcessedBytes > 0) {
+                val p = (1.0 - (totalProcessedBytes.toDouble() / base.toDouble())) * 100
+                p.coerceAtLeast(0.0).toInt()
+            } else 0
+        }
 }
 
 class ImageEditorViewModel(application: Application) : AndroidViewModel(application) {
@@ -500,7 +548,9 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
 
     fun selectAllBatchItems(selected: Boolean) {
         _batchState.update { state ->
-            val updated = state.items.map { it.copy(isSelected = selected) }
+            val updated = state.items.map { item ->
+                if (item.isSelected == selected) item else item.copy(isSelected = selected)
+            }
             state.copy(items = updated)
         }
     }
@@ -525,15 +575,19 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun loadDevicePhotos(context: Context) {
+        if (_batchState.value.isLoadingGallery) return
         viewModelScope.launch {
-            _batchState.update { it.copy(statusMessage = "기기 갤러리 사진을 불러오는 중...") }
-            val entries = withContext(Dispatchers.IO) {
-                ImageUtils.queryDevicePhotosWithMetadata(context, limit = 500)
+            _batchState.update {
+                it.copy(
+                    isLoadingGallery = true,
+                    statusMessage = "기기 갤러리의 모든 사진을 스캔하는 중..."
+                )
             }
-            if (entries.isNotEmpty()) {
-                val newItems = entries.map { entry ->
+            val newItems = withContext(Dispatchers.IO) {
+                val entries = ImageUtils.queryDevicePhotosWithMetadata(context)
+                entries.map { entry ->
                     BatchProcessItem(
-                        id = UUID.randomUUID().toString(),
+                        id = entry.uri.toString(),
                         uri = entry.uri,
                         fileName = entry.name,
                         originalSizeBytes = entry.sizeBytes,
@@ -543,21 +597,64 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                         status = BatchItemStatus.PENDING
                     )
                 }
-                _batchState.update { state ->
-                    val existingUris = state.items.map { it.uri }.toSet()
+            }
+            if (newItems.isNotEmpty()) {
+                val mergeResult = withContext(Dispatchers.Default) {
+                    val currentItems = _batchState.value.items
+                    val existingUris = HashSet<Uri>(currentItems.size + 16)
+                    for (item in currentItems) {
+                        existingUris.add(item.uri)
+                    }
                     val filteredNew = newItems.filterNot { it.uri in existingUris }
-                    val combined = state.items + filteredNew
-                    val totalOriginal = combined.sumOf { it.originalSizeBytes }
+                    val combined = currentItems + filteredNew
+                    var totalOriginal = 0L
+                    for (item in combined) {
+                        totalOriginal += item.originalSizeBytes
+                    }
+                    Triple(combined, filteredNew.size, totalOriginal)
+                }
+                val (combined, addedCount, totalOriginal) = mergeResult
+                _batchState.update { state ->
                     state.copy(
                         items = combined,
+                        isLoadingGallery = false,
                         totalOriginalBytes = totalOriginal,
                         isCompleted = false,
-                        statusMessage = "${filteredNew.size}개 기기 사진을 불러왔습니다."
+                        statusMessage = if (addedCount > 0) {
+                            "총 ${String.format("%,d", addedCount)}개의 기기 사진을 불러왔습니다."
+                        } else {
+                            "새로 추가할 기기 사진이 없습니다."
+                        }
                     )
                 }
             } else {
-                _batchState.update { it.copy(statusMessage = "불러올 수 있는 기기 사진이 없습니다. (권한 또는 갤러리를 확인해 주세요)") }
+                _batchState.update {
+                    it.copy(
+                        isLoadingGallery = false,
+                        statusMessage = "불러올 수 있는 기기 사진이 없습니다. (권한 또는 갤러리를 확인해 주세요)"
+                    )
+                }
             }
+        }
+    }
+
+    private fun enqueueBatchDelete(uris: List<Uri>) {
+        if (uris.isEmpty()) {
+            _batchState.update { it.copy(statusMessage = "삭제할 수 있는 완료된 원본 파일이 없습니다.") }
+            return
+        }
+        val firstChunk = uris.take(ImageUtils.MAX_DELETE_BATCH_SIZE)
+        val remaining = if (uris.size > ImageUtils.MAX_DELETE_BATCH_SIZE) {
+            uris.drop(ImageUtils.MAX_DELETE_BATCH_SIZE)
+        } else {
+            emptyList()
+        }
+        _batchState.update {
+            it.copy(
+                deleteOriginalPromptUris = firstChunk,
+                pendingDeleteQueue = remaining,
+                totalDeleteBatchCount = uris.size
+            )
         }
     }
 
@@ -565,11 +662,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
         val completedUris = _batchState.value.items
             .filter { it.status == BatchItemStatus.COMPLETED }
             .map { it.uri }
-        if (completedUris.isNotEmpty()) {
-            _batchState.update { it.copy(deleteOriginalPromptUris = completedUris) }
-        } else {
-            _batchState.update { it.copy(statusMessage = "삭제할 수 있는 완료된 원본 파일이 없습니다.") }
-        }
+        enqueueBatchDelete(completedUris)
     }
 
     fun requestDeleteSingleOriginal() {
@@ -585,6 +678,12 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
             .mapNotNull { it.resultUri }
         if (completedUris.isEmpty()) {
             _batchState.update { it.copy(statusMessage = "PDF로 변환할 완료된 이미지가 없습니다.") }
+            return
+        }
+        if (completedUris.size > 100) {
+            _batchState.update {
+                it.copy(statusMessage = "PDF 변환은 한 번에 최대 100장까지 지원됩니다. (현재 ${completedUris.size}장)")
+            }
             return
         }
         viewModelScope.launch {
@@ -610,7 +709,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
         if (state.items.isEmpty() || state.isProcessing) return
 
         // Process selected items or all if none selected
-        val targetItems = if (state.items.any { it.isSelected }) {
+        val itemsToProcess = if (state.items.any { it.isSelected }) {
             state.items.filter { it.isSelected }
         } else {
             state.items
@@ -622,24 +721,30 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                     isProcessing = true,
                     isCompleted = false,
                     currentProcessingIndex = 0,
+                    processingTargetCount = itemsToProcess.size,
+                    processedOriginalBytes = 0L,
                     totalProcessedBytes = 0L,
-                    statusMessage = "${targetItems.size}개 일괄 압축 처리를 시작합니다..."
+                    statusMessage = "${String.format("%,d", itemsToProcess.size)}개 일괄 압축 처리를 시작합니다..."
                 )
             }
 
             var processedSum = 0L
-            val completedList = mutableListOf<BatchProcessItem>()
-            val itemsToProcess = targetItems
+            var processedOrigSum = 0L
+            var successfulCount = 0
+            val originalUrisToDelete = ArrayList<Uri>(itemsToProcess.size)
+            val recentCompletedForHistory = ArrayDeque<BatchProcessItem>(500)
             val config = state.config
+
+            val workingList = state.items.toMutableList()
+            val indexById = HashMap<String, Int>(workingList.size)
+            for (i in workingList.indices) {
+                indexById[workingList[i].id] = i
+            }
+
+            var lastUiSyncTimeMs = 0L
 
             for (index in itemsToProcess.indices) {
                 val item = itemsToProcess[index]
-                _batchState.update {
-                    it.copy(
-                        currentProcessingIndex = index + 1,
-                        statusMessage = "(${index + 1}/${itemsToProcess.size}) '${item.fileName}' 압축 중..."
-                    )
-                }
 
                 val processedItem = withContext(Dispatchers.IO) {
                     try {
@@ -648,6 +753,9 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                                 status = BatchItemStatus.FAILED,
                                 errorMessage = "이미지 디코딩 실패"
                             )
+
+                        val resolvedOrigW = if (item.originalWidth > 0) item.originalWidth else bitmap.width
+                        val resolvedOrigH = if (item.originalHeight > 0) item.originalHeight else bitmap.height
 
                         // Determine target format
                         val targetFormat = config.formatChoice.format ?: when {
@@ -658,7 +766,7 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
 
                         // Resize
                         val (targetW, targetH) = ImageUtils.calculateTargetDimensions(
-                            item.originalWidth, item.originalHeight, config.resizeMode
+                            resolvedOrigW, resolvedOrigH, config.resizeMode
                         )
                         val resized = ImageUtils.resizeBitmap(bitmap, targetW, targetH)
                         if (resized != bitmap) {
@@ -682,8 +790,10 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                             ImageUtils.compressBitmap(finalBitmap, targetFormat, config.quality)
                         }
 
-                        // Generate clean filename
-                        val dateStr = ImageUtils.getExifDateFormatted(context, item.uri)
+                        // Generate clean filename (only read EXIF date if pattern requires it)
+                        val dateStr = if (config.renamePattern == com.example.model.RenamePattern.DATE_TIME) {
+                            ImageUtils.getExifDateFormatted(context, item.uri)
+                        } else ""
                         val targetFileName = ImageUtils.generateTargetFileName(
                             config.renamePattern,
                             config.customPrefix,
@@ -706,12 +816,16 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                         if (savedUri != null) {
                             item.copy(
                                 fileName = targetFileName,
+                                originalWidth = resolvedOrigW,
+                                originalHeight = resolvedOrigH,
                                 status = BatchItemStatus.COMPLETED,
                                 processedSizeBytes = bytes.size.toLong(),
                                 resultUri = savedUri
                             )
                         } else {
                             item.copy(
+                                originalWidth = resolvedOrigW,
+                                originalHeight = resolvedOrigH,
                                 status = BatchItemStatus.FAILED,
                                 errorMessage = "저장 실패"
                             )
@@ -725,27 +839,45 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
 
-                completedList.add(processedItem)
-                if (processedItem.processedSizeBytes != null) {
-                    processedSum += processedItem.processedSizeBytes
+                if (processedItem.status == BatchItemStatus.COMPLETED) {
+                    successfulCount++
+                    originalUrisToDelete.add(processedItem.uri)
+                    processedOrigSum += processedItem.originalSizeBytes
+                    if (processedItem.processedSizeBytes != null) {
+                        processedSum += processedItem.processedSizeBytes
+                    }
+                    if (recentCompletedForHistory.size >= 500) {
+                        recentCompletedForHistory.removeFirst()
+                    }
+                    recentCompletedForHistory.addLast(processedItem)
                 }
 
-                _batchState.update { s ->
-                    val updatedItems = s.items.toMutableList()
-                    val targetIdx = updatedItems.indexOfFirst { it.id == item.id }
-                    if (targetIdx != -1) {
-                        updatedItems[targetIdx] = processedItem
+                val targetIdx = indexById[item.id]
+                if (targetIdx != null) {
+                    workingList[targetIdx] = processedItem
+                }
+
+                // Throttle full list snapshot emissions for O(N) performance on 10k~20k batches
+                val now = System.currentTimeMillis()
+                if (now - lastUiSyncTimeMs >= 200L || index == 0 || index == itemsToProcess.lastIndex) {
+                    lastUiSyncTimeMs = now
+                    val snapshot = workingList.toList()
+                    _batchState.update { s ->
+                        s.copy(
+                            items = snapshot,
+                            currentProcessingIndex = index + 1,
+                            processedOriginalBytes = processedOrigSum,
+                            totalProcessedBytes = processedSum,
+                            statusMessage = "(${index + 1}/${itemsToProcess.size}) '${item.fileName}' 압축 중..."
+                        )
                     }
-                    s.copy(
-                        items = updatedItems,
-                        totalProcessedBytes = processedSum
-                    )
                 }
             }
 
-            // Record to saved history
-            val newHistoryItems = completedList
-                .filter { it.status == BatchItemStatus.COMPLETED && it.resultUri != null }
+            // Record recent completed items to saved history (capped to keep UI responsive)
+            val newHistoryItems = recentCompletedForHistory
+                .asReversed()
+                .filter { it.resultUri != null }
                 .map { item ->
                     SavedHistoryItem(
                         id = UUID.randomUUID().toString(),
@@ -758,33 +890,35 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
                         format = config.formatChoice.format ?: ImageFormat.JPEG
                     )
                 }
-            _savedHistory.update { newHistoryItems + it }
+            _savedHistory.update { existing ->
+                (newHistoryItems + existing).take(1000)
+            }
 
-            val successfulCount = completedList.count { it.status == BatchItemStatus.COMPLETED }
-            val savedMb = (state.totalOriginalBytes - processedSum) / (1024.0 * 1024.0)
+            val savedMb = ((processedOrigSum - processedSum).coerceAtLeast(0L)) / (1024.0 * 1024.0)
+            val finalSnapshot = workingList.toList()
 
             _batchState.update { s ->
                 s.copy(
+                    items = finalSnapshot,
                     isProcessing = false,
                     isCompleted = true,
-                    statusMessage = "총 ${successfulCount}개 이미지 압축 완료! (약 ${String.format("%.1f", savedMb)} MB 절약)"
+                    currentProcessingIndex = itemsToProcess.size,
+                    processingTargetCount = itemsToProcess.size,
+                    processedOriginalBytes = processedOrigSum,
+                    totalProcessedBytes = processedSum,
+                    statusMessage = "총 ${String.format("%,d", successfulCount)}개 이미지 압축 완료! (약 ${String.format("%.1f", savedMb)} MB 절약)"
                 )
             }
 
             // If user selected to delete originals
-            if (config.deleteOriginal) {
-                val originalUrisToDelete = completedList
-                    .filter { it.status == BatchItemStatus.COMPLETED }
-                    .map { it.uri }
-                if (originalUrisToDelete.isNotEmpty()) {
-                    _batchState.update { it.copy(deleteOriginalPromptUris = originalUrisToDelete) }
-                }
+            if (config.deleteOriginal && originalUrisToDelete.isNotEmpty()) {
+                enqueueBatchDelete(originalUrisToDelete)
             }
         }
     }
 
     // -------------------------------------------------------------
-    // Deletion Request Management (Scoped Storage safe)
+    // Deletion Request Management (Scoped Storage & Binder safe)
     // -------------------------------------------------------------
 
     fun getDeleteIntentSenderRequest(context: Context, uris: List<Uri>): IntentSenderRequest? {
@@ -792,13 +926,55 @@ class ImageEditorViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun onOriginalsDeleted(deletedUris: List<Uri>) {
-        _singleState.update { it.copy(deleteOriginalPromptUris = null, statusMessage = "원본 이미지가 안전하게 삭제되었습니다.") }
-        _batchState.update { it.copy(deleteOriginalPromptUris = null, statusMessage = "원본 ${deletedUris.size}개 이미지가 삭제되었습니다.") }
+        if (_singleState.value.deleteOriginalPromptUris != null) {
+            _singleState.update {
+                it.copy(deleteOriginalPromptUris = null, statusMessage = "원본 이미지가 안전하게 삭제되었습니다.")
+            }
+        }
+        val currentBatch = _batchState.value
+        if (currentBatch.deleteOriginalPromptUris != null) {
+            val remaining = currentBatch.pendingDeleteQueue
+            if (remaining.isNotEmpty()) {
+                val nextChunk = remaining.take(ImageUtils.MAX_DELETE_BATCH_SIZE)
+                val nextQueue = if (remaining.size > ImageUtils.MAX_DELETE_BATCH_SIZE) {
+                    remaining.drop(ImageUtils.MAX_DELETE_BATCH_SIZE)
+                } else {
+                    emptyList()
+                }
+                _batchState.update {
+                    it.copy(
+                        deleteOriginalPromptUris = nextChunk,
+                        pendingDeleteQueue = nextQueue,
+                        statusMessage = "${deletedUris.size}장 삭제 완료 — 남은 ${remaining.size}장 삭제를 이어서 진행합니다."
+                    )
+                }
+            } else {
+                val totalDeleted = if (currentBatch.totalDeleteBatchCount > 0) {
+                    currentBatch.totalDeleteBatchCount
+                } else {
+                    deletedUris.size
+                }
+                _batchState.update {
+                    it.copy(
+                        deleteOriginalPromptUris = null,
+                        pendingDeleteQueue = emptyList(),
+                        totalDeleteBatchCount = 0,
+                        statusMessage = "원본 ${String.format("%,d", totalDeleted)}개 이미지 삭제가 완료되었습니다."
+                    )
+                }
+            }
+        }
     }
 
     fun dismissDeletePrompt() {
         _singleState.update { it.copy(deleteOriginalPromptUris = null) }
-        _batchState.update { it.copy(deleteOriginalPromptUris = null) }
+        _batchState.update {
+            it.copy(
+                deleteOriginalPromptUris = null,
+                pendingDeleteQueue = emptyList(),
+                totalDeleteBatchCount = 0
+            )
+        }
     }
 
     fun clearSavedHistory() {

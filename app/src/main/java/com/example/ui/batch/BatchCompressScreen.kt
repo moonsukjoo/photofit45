@@ -168,6 +168,7 @@ fun BatchCompressScreen(
 
     if (batchState.items.isEmpty()) {
         BatchEmptyState(
+            isLoadingGallery = batchState.isLoadingGallery,
             onPickBatch = {
                 batchPickerLauncher.launch(
                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -209,6 +210,7 @@ fun BatchCompressScreen(
 
 @Composable
 private fun BatchEmptyState(
+    isLoadingGallery: Boolean,
     onPickBatch: () -> Unit,
     onLoadDevicePhotos: () -> Unit,
     modifier: Modifier = Modifier
@@ -288,23 +290,37 @@ private fun BatchEmptyState(
         // Option 2: Device Gallery All Photos
         OutlinedButton(
             onClick = onLoadDevicePhotos,
+            enabled = !isLoadingGallery,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
                 .testTag("load_device_photos_button"),
             shape = RoundedCornerShape(16.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.FolderOpen,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "기기 갤러리 사진 전체 불러오기 (전체 선택 지원)",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            if (isLoadingGallery) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "기기 갤러리 사진 불러오는 중...",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "기기 갤러리 사진 전체 불러오기 (전체 선택 지원)",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
     }
 }
@@ -341,7 +357,7 @@ private fun BatchWorkspace(
                 ) {
                     Column {
                         Text(
-                            text = "총 ${batchState.items.size}개 사진 (선택 ${batchState.selectedCount}개)",
+                            text = "총 ${String.format("%,d", batchState.items.size)}개 사진 (선택 ${String.format("%,d", batchState.selectedCount)}개)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -456,8 +472,13 @@ private fun BatchWorkspace(
 
         // Processing Progress Bar (if processing)
         if (batchState.isProcessing) {
-            val progress = if (batchState.totalCount > 0) {
-                batchState.currentProcessingIndex.toFloat() / batchState.totalCount.toFloat()
+            val targetTotal = if (batchState.processingTargetCount > 0) {
+                batchState.processingTargetCount
+            } else {
+                batchState.totalCount
+            }
+            val progress = if (targetTotal > 0) {
+                (batchState.currentProcessingIndex.toFloat() / targetTotal.toFloat()).coerceIn(0f, 1f)
             } else 0f
 
             Column(
@@ -471,7 +492,7 @@ private fun BatchWorkspace(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "${batchState.currentProcessingIndex} / ${batchState.totalCount} 처리 중",
+                        text = "${String.format("%,d", batchState.currentProcessingIndex)} / ${String.format("%,d", targetTotal)} 처리 중",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
@@ -534,7 +555,7 @@ private fun BatchWorkspace(
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "총 ${ImageUtils.formatBytes(batchState.totalOriginalBytes)} → ${ImageUtils.formatBytes(batchState.totalProcessedBytes)} (${ImageUtils.formatBytes(batchState.totalSavedBytes)} 절약, -${batchState.overallSavingsPercent}%)",
+                                text = "총 ${ImageUtils.formatBytes(batchState.comparisonOriginalBytes)} → ${ImageUtils.formatBytes(batchState.totalProcessedBytes)} (${ImageUtils.formatBytes(batchState.totalSavedBytes)} 절약, -${batchState.overallSavingsPercent}%)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -607,7 +628,7 @@ private fun BatchWorkspace(
                         Spacer(modifier = Modifier.height(4.dp))
 
                         Text(
-                            text = "압축된 사진이 갤러리에 안전하게 저장되었습니다. 이제 기기 용량을 대폭 확보하기 위해 원본 사진(${batchState.completedCount}장)을 지금 삭제하시겠습니까?",
+                            text = "압축된 사진이 갤러리에 안전하게 저장되었습니다. 이제 기기 용량을 대폭 확보하기 위해 원본 사진(${String.format("%,d", batchState.completedCount)}장)을 지금 삭제하시겠습니까?",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -626,7 +647,7 @@ private fun BatchWorkspace(
                             ) {
                                 Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("원본 사진 ${batchState.completedCount}개 지금 삭제", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text("원본 사진 ${String.format("%,d", batchState.completedCount)}개 지금 삭제", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -657,7 +678,7 @@ private fun BatchWorkspace(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "처리 목록 (${batchState.selectedCount}/${batchState.items.size}개 선택됨)",
+                        text = "처리 목록 (${String.format("%,d", batchState.selectedCount)}/${String.format("%,d", batchState.items.size)}개 선택됨)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -718,7 +739,7 @@ private fun BatchWorkspace(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (batchState.isCompleted) "다시 일괄 압축하기" else "${buttonCount}개 사진 일괄 압축 시작",
+                            text = if (batchState.isCompleted) "다시 일괄 압축하기" else "${String.format("%,d", buttonCount)}개 사진 일괄 압축 시작",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -1013,8 +1034,13 @@ private fun BatchItemCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
+                val metaLine = if (item.originalWidth > 0 && item.originalHeight > 0) {
+                    "${item.originalWidth}×${item.originalHeight} • ${ImageUtils.formatBytes(item.originalSizeBytes)}"
+                } else {
+                    ImageUtils.formatBytes(item.originalSizeBytes)
+                }
                 Text(
-                    text = "${item.originalWidth}×${item.originalHeight} • ${ImageUtils.formatBytes(item.originalSizeBytes)}",
+                    text = metaLine,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -105,12 +105,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun shareMultipleUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val safeUris = if (uris.size > 100) uris.take(100) else uris
         val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             type = "image/*"
-            putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(safeUris))
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(shareIntent, "압축된 이미지 전체 공유"))
+        startActivity(Intent.createChooser(shareIntent, "압축된 이미지 공유 (${safeUris.size}장)"))
     }
 }
 
@@ -162,6 +164,15 @@ fun MainAppScreen(
     val pendingDeleteUris = singleState.deleteOriginalPromptUris ?: batchState.deleteOriginalPromptUris
 
     if (pendingDeleteUris != null && pendingDeleteUris.isNotEmpty()) {
+        val isBatchChunked = singleState.deleteOriginalPromptUris == null &&
+            batchState.totalDeleteBatchCount > pendingDeleteUris.size
+        val remainingAfterThis = if (singleState.deleteOriginalPromptUris == null) {
+            batchState.pendingDeleteQueue.size
+        } else 0
+        val alreadyDone = if (isBatchChunked) {
+            (batchState.totalDeleteBatchCount - pendingDeleteUris.size - remainingAfterThis).coerceAtLeast(0)
+        } else 0
+
         AlertDialog(
             onDismissRequest = { viewModel.dismissDeletePrompt() },
             icon = {
@@ -174,13 +185,26 @@ fun MainAppScreen(
             },
             title = {
                 Text(
-                    text = "원본 사진 삭제 확인",
+                    text = if (isBatchChunked && alreadyDone > 0) {
+                        "원본 사진 연속 삭제 (${String.format("%,d", alreadyDone)}/${String.format("%,d", batchState.totalDeleteBatchCount)}장 완료)"
+                    } else {
+                        "원본 사진 삭제 확인"
+                    },
                     fontWeight = FontWeight.Bold
                 )
             },
             text = {
+                val message = if (isBatchChunked) {
+                    "압축된 새로운 사진이 갤러리에 안전하게 저장되었습니다.\n\n" +
+                        "안드로이드 시스템 제한으로 인해 한 번에 최대 ${ImageUtils.MAX_DELETE_BATCH_SIZE}장씩 나누어 삭제 승인을 진행합니다.\n" +
+                        "• 전체 대상: ${String.format("%,d", batchState.totalDeleteBatchCount)}장\n" +
+                        "• 이번 삭제 요청: ${pendingDeleteUris.size}장\n" +
+                        "• 남은 대기: ${String.format("%,d", remainingAfterThis)}장"
+                } else {
+                    "압축된 새로운 사진이 갤러리에 안전하게 저장되었습니다.\n\n선택하신 옵션에 따라 기기 용량 확보를 위해 원본 사진 (${pendingDeleteUris.size}장)을 지금 삭제하시겠습니까?"
+                }
                 Text(
-                    text = "압축된 새로운 사진이 갤러리에 안전하게 저장되었습니다.\n\n선택하신 옵션에 따라 기기 용량 확보를 위해 원본 사진 (${pendingDeleteUris.size}장)을 지금 삭제하시겠습니까?",
+                    text = message,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
@@ -204,12 +228,19 @@ fun MainAppScreen(
                     colors = ButtonDefaults.textButtonColors(contentColor = ErrorRed),
                     modifier = Modifier.testTag("confirm_delete_original_button")
                 ) {
-                    Text("원본 삭제", fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (isBatchChunked) {
+                            if (alreadyDone > 0) "다음 ${pendingDeleteUris.size}장 삭제 진행" else "${pendingDeleteUris.size}장씩 삭제 시작"
+                        } else {
+                            "원본 삭제"
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissDeletePrompt() }) {
-                    Text("원본 유지 (취소)")
+                    Text(if (isBatchChunked && alreadyDone > 0) "나머지 중단" else "원본 유지 (취소)")
                 }
             }
         )
