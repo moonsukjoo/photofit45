@@ -1,0 +1,6 @@
+{
+  "name": "포토핏",
+  "description": "이미지 사이즈 편집, 용량 줄이기, 다중 선택 일괄 압축, 포맷 변환 및 감성 필터 보정 앱",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
