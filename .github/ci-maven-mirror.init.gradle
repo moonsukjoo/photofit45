@@ -1,0 +1,22 @@
+// Redirect Maven Central (repo.maven.apache.org) to Google's official Maven Central mirror in CI
+// to avoid HTTP 403 Forbidden rate-limiting on shared GitHub Actions runners.
+def mirrorUrl = "https://maven-central.storage-download.googleapis.com/maven2/"
+
+def rewriteMavenCentral = { ArtifactRepository repo ->
+    if (repo instanceof MavenArtifactRepository) {
+        def currentUrl = repo.url?.toString() ?: ""
+        if (currentUrl.contains("repo.maven.apache.org") || currentUrl.contains("repo1.maven.org")) {
+            repo.setUrl(mirrorUrl)
+        }
+    }
+}
+
+gradle.beforeSettings { settings ->
+    settings.pluginManagement.repositories.all(rewriteMavenCentral)
+    settings.dependencyResolutionManagement.repositories.all(rewriteMavenCentral)
+}
+
+gradle.allprojects { proj ->
+    proj.buildscript.repositories.all(rewriteMavenCentral)
+    proj.repositories.all(rewriteMavenCentral)
+}

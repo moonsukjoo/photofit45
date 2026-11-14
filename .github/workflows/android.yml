@@ -71,6 +71,7 @@ jobs:
       - name: Run Unit Tests & Build Debug APK
         run: |
           ./gradlew testDebugUnitTest assembleDebug \
+            --init-script .github/ci-maven-mirror.init.gradle \
             --no-daemon \
             --console=plain \
             --max-workers=2 \
@@ -141,6 +142,7 @@ jobs:
           printf '%s' "$RELEASE_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "$RUNNER_TEMP/release-keystore.jks"
           export KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
           ./gradlew assembleRelease bundleRelease \
+            --init-script .github/ci-maven-mirror.init.gradle \
             --no-daemon \
             --console=plain \
             --max-workers=2 \
